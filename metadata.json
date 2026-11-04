@@ -1,0 +1,6 @@
+{
+  "name": "RELAY AI",
+  "description": "Autonomous engineering pipeline converting natural-language bug reports into verified, sandbox-tested Git patches with human approval.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
