@@ -167,12 +167,37 @@ class SandboxRunner:
         source_files: Optional[set[str] | list[str]] = None,
     ) -> Tuple[bool, Optional[str]]:
         """Require every patch header to name the same safe, existing source file."""
+        if not isinstance(unified_diff, str):
+            return False, "Patch must be UTF-8 text."
+        try:
+            if len(unified_diff.encode("utf-8")) > 1_000_000:
+                return False, "Patch exceeds the 1 MiB limit."
+        except UnicodeEncodeError:
+            return False, "Patch contains invalid UTF-8 text."
         targets = set()
         try:
             lines = unified_diff.splitlines()
-            for index, line in enumerate(lines):
-                if not line.startswith("diff --git "):
-                    continue
+            diff_sections = [
+                (index, line)
+                for index, line in enumerate(lines)
+                if line.startswith("diff --git ")
+            ]
+            for section_index, (index, line) in enumerate(diff_sections):
+                next_diff = (
+                    diff_sections[section_index + 1][0]
+                    if section_index + 1 < len(diff_sections)
+                    else len(lines)
+                )
+                metadata = lines[index + 1:next_diff]
+                if any(
+                    item.startswith((
+                        "old mode ", "new mode ", "new file mode ", "deleted file mode ",
+                        "rename from ", "rename to ", "copy from ", "copy to ",
+                        "GIT binary patch", "Binary files ",
+                    ))
+                    for item in metadata
+                ):
+                    return False, "Patch may only change text contents; file modes, renames, and binary patches are not supported."
                 parts = shlex.split(line)
                 if len(parts) != 4 or not parts[2].startswith("a/") or not parts[3].startswith("b/"):
                     return False, "Malformed diff header."
@@ -185,7 +210,9 @@ class SandboxRunner:
                     return False, f"Unsafe patch target path: {target!r}"
                 if normalized_target != target:
                     return False, f"Patch target path is not in canonical form: {target!r}"
-                file_headers = [item for item in lines[index + 1:] if item.startswith(("--- ", "+++ "))]
+                if target in targets:
+                    return False, f"Patch contains multiple diff sections for {target!r}."
+                file_headers = [item for item in metadata if item.startswith(("--- ", "+++ "))]
                 if len(file_headers) < 2:
                     return False, f"Patch is missing unified file headers for {target!r}."
                 try:

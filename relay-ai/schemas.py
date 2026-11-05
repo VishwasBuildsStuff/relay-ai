@@ -147,6 +147,7 @@ class InvestigationAndPatchResult(BaseModel):
     )
     unified_diff: str = Field(
         ...,
+        max_length=1_000_000,
         description="Minimal, valid Unified Git Diff (e.g. diff --git a/... b/...)."
     )
     summary_of_changes: str = Field(
