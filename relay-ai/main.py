@@ -18,6 +18,7 @@ import uuid
 import zipfile
 import datetime
 import json
+import ipaddress
 from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
@@ -129,6 +130,9 @@ cors_origins = [
     ).split(",")
     if origin.strip()
 ]
+RELAY_ENV = os.environ.get("RELAY_ENV", "development").strip().lower()
+if RELAY_ENV not in {"development", "production"}:
+    raise RuntimeError("RELAY_ENV must be either 'development' or 'production'.")
 API_TOKEN = os.environ.get("RELAY_API_TOKEN")
 try:
     AUTH_USERS = json.loads(os.environ.get("RELAY_AUTH_USERS_JSON", "{}"))
@@ -153,6 +157,15 @@ if not isinstance(AUTH_ROLES, dict) or any(
     for username, role in AUTH_ROLES.items()
 ):
     raise RuntimeError("RELAY_AUTH_ROLES_JSON must map configured usernames to 'viewer' or 'operator'.")
+if RELAY_ENV == "production":
+    if not (API_TOKEN or AUTH_USERS):
+        raise RuntimeError("Production mode requires RELAY_API_TOKEN or RELAY_AUTH_USERS_JSON.")
+    if "RELAY_CORS_ORIGINS" not in os.environ:
+        raise RuntimeError("Production mode requires an explicit RELAY_CORS_ORIGINS allow-list.")
+    if "*" in cors_origins:
+        raise RuntimeError("Production mode does not allow wildcard CORS origins.")
+    if os.environ.get("RELAY_ALLOW_UNSAFE_SUBPROCESS", "false").strip().lower() == "true":
+        raise RuntimeError("Production mode cannot enable RELAY_ALLOW_UNSAFE_SUBPROCESS.")
 
 
 @app.middleware("http")
@@ -1093,4 +1106,14 @@ def get_benchmark_scenarios():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    bind_host = os.environ.get("RELAY_HOST", "127.0.0.1").strip()
+    try:
+        bind_address = ipaddress.ip_address(bind_host)
+    except ValueError as error:
+        raise RuntimeError("RELAY_HOST must be an IPv4 or IPv6 address literal.") from error
+    if not bind_address.is_loopback and not (API_TOKEN or AUTH_USERS):
+        raise RuntimeError(
+            "Authentication is required when RELAY_HOST binds beyond localhost. "
+            "Configure RELAY_API_TOKEN or RELAY_AUTH_USERS_JSON."
+        )
+    uvicorn.run("main:app", host=bind_host, port=8000, reload=False)

@@ -11,6 +11,21 @@ Last updated: 2026-11-05 (Asia/Kolkata)
 
 ## Current milestone: Local end-to-end MVP — finishing durable operations, hardening, and product QA
 
+## Follow-on milestone: Single-host production readiness (1/10 complete)
+
+| ID | Task | Status | Evidence / next step |
+|---|---|---|---|
+| H1 | Enforce safe production startup configuration | DONE | `RELAY_ENV=production` requires authentication and explicit non-wildcard CORS origins, rejects unsafe host subprocess mode, and is enabled by the systemd template. Direct `python main.py` startup defaults to loopback and requires auth for non-loopback binds. |
+| H2 | Pin and document sandbox image provenance | TODO | Select a maintained image digest, record build inputs, and document the update process. |
+| H3 | Define reverse-proxy deployment limits | TODO | Document and configure body, connection, timeout, and forwarded-header policy for the chosen proxy. |
+| H4 | Verify authentication and CORS on the deployment host | TODO | Exercise viewer/operator ownership and browser-origin behavior with production configuration. |
+| H5 | Verify hostile archives and patch boundaries | TODO | Run request-level adversarial cases, including normalization collisions, special files, path traversal, and mismatched patch declarations. |
+| H6 | Verify sandbox isolation on the deployment host | TODO | Confirm network, filesystem, user, resource, and output limits against the installed Docker runtime and image. |
+| H7 | Verify worker concurrency and recovery | TODO | Exercise lease expiry, restart recovery, cancellation races, and bounded retry behavior. |
+| H8 | Rehearse configured Git target operations | TODO | Exercise stale-base rejection, changed-file-only apply/commit, and interrupted-operation recovery in a disposable repository. |
+| H9 | Complete backup restore and alerting drill | TODO | Restore an archive into isolation, inspect task history, and prove the backup-age failure reaches an assigned alert destination. |
+| H10 | Complete accessibility, load, and ownership review | TODO | Perform keyboard/screen-reader and load review; assign named operators, data-use approval, and service objectives before exposure. |
+
 | ID | Task | Status | Evidence / next step |
 |---|---|---|---|
 | P0-01 | Write product and engineering blueprint | DONE | [`BLUEPRINT.md`](./BLUEPRINT.md) |
@@ -383,3 +398,13 @@ No tests have been run. `npm install`, `npm run build`, `npm run lint` (TypeScri
 - Added a deployment record template for named ownership, authentication references, Docker socket policy, repository targets, backup/alert setup, Gemini data approval, and restore-drill signoff.
 - Marked P4-02 complete for the local MVP implementation; host-specific configuration, alert integration, and an executed restore drill remain explicit requirements before production exposure.
 - Verification: Python syntax compilation, backup CLI help, FastAPI import (30 routes/schema 10), Vite production build, TypeScript check, `git diff --check`, and roadmap count (19/19) passed. No deployment was installed and no restore drill was performed.
+
+### 2026-11-05 — Start single-host production readiness phase
+- Added `RELAY_ENV=production` startup checks requiring authentication and explicit non-wildcard CORS origins, and rejecting unsafe host-subprocess mode. The systemd service template enables production mode; setup docs explain required configuration.
+- Added a separate 10-task production-readiness phase so the completed 19-item local MVP and operator-dependent release gates are tracked independently. H1 is complete (1/10); H2–H10 require deployment-specific work or execution-level verification.
+- No tests were added or run.
+
+### 2026-11-05 — Default direct API startup to localhost
+- Changed `python main.py` to bind to `127.0.0.1` by default, require an IP literal for `RELAY_HOST`, and refuse non-loopback binds unless shared-token or per-user authentication is configured. Disabled auto-reload in this entry point.
+- Documented the bind and authentication behavior in both setup guides and `.env.example`.
+- Verification: not run in this change; no tests were added or executed.

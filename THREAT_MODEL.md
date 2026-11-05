@@ -38,6 +38,7 @@
 ## Deployment requirements before remote exposure
 
 1. Put the API behind TLS and a reverse proxy with request-body, connection, and request-time limits. Keep it off the public network until authentication is mandatory.
+   The `python main.py` entry point binds to loopback by default and refuses a non-loopback `RELAY_HOST` unless shared-token or per-user authentication is configured. When launching Uvicorn directly, explicitly bind to loopback for local use and configure authentication before selecting a network interface.
 2. Configure unique per-user tokens from a secret manager, explicit production CORS origins, restrictive filesystem permissions, and a dedicated service account. Do not use local-operator or shared-token mode for a multi-user service.
 3. Restrict Docker daemon access to the trusted service host/operator. Use a maintained, pinned sandbox image and verify its runtime restrictions on the target host. Keep unsafe subprocess mode disabled.
 4. Approve Gemini data handling for submitted source, define source retention, encrypt backups at rest, and restrict log/backup readers.

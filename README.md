@@ -12,8 +12,10 @@ Requirements: Node.js, Python 3.11+, Git, and (for isolated code execution) Dock
 2. Create a Python environment in `relay-ai/` and install `pip install -r requirements.txt`.
 3. Configure `GEMINI_API_KEY` in the backend environment. The provider defaults to `gemini-2.5-flash` and can be changed with `GEMINI_MODEL`.
 4. Build the sandbox image: `docker build -t relay-ai-sandbox:python3.11 relay-ai/sandbox`.
-5. Start the API from `relay-ai/`: `uvicorn main:app --host 127.0.0.1 --port 8000`.
+5. Start the API from `relay-ai/`: `uvicorn main:app --host 127.0.0.1 --port 8000`. Running `python main.py` also binds to localhost by default; set `RELAY_HOST` to an IP address for another interface and configure `RELAY_API_TOKEN` or `RELAY_AUTH_USERS_JSON` before doing so.
 6. Start the dashboard from the repository root: `npm run dev`.
+
+For deployment, set `RELAY_ENV=production`; the backend then requires authentication and an explicit non-wildcard CORS origin allow-list and rejects unsafe host-subprocess mode. The systemd service template enables production mode.
 
 The dashboard uses `VITE_API_URL` when set; otherwise it connects to `http://localhost:8000`. Backend options include `RELAY_DB_PATH`, `RELAY_APPLIED_ROOT`, `RELAY_CORS_ORIGINS`, `RELAY_API_TOKEN`, `RELAY_AUTH_USERS_JSON`, `RELAY_AUTH_ROLES_JSON`, `RELAY_SANDBOX_IMAGE`, and `RELAY_ALLOW_UNSAFE_SUBPROCESS`. `RELAY_API_TOKEN` provides one shared credential. For per-user ownership, configure `RELAY_AUTH_USERS_JSON` with username-to-unique-token mappings; it takes precedence over the shared token. Optionally assign `viewer` or `operator` roles with `RELAY_AUTH_ROLES_JSON`; when the role map is set, users omitted from it are viewers. Operators can submit, cancel, retry, approve, reject, apply, commit, and delete their own tasks. Viewers can inspect only their own task data. Enter the active token in the dashboard header; it stays in the browser tab session. Keep the subprocess option disabled when handling untrusted uploads: it runs uploaded code on the API host and is provided only for trusted local development.
 
