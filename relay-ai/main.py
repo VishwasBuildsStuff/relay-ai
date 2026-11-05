@@ -23,6 +23,7 @@ import re
 from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -165,6 +166,26 @@ if RELAY_ENV == "production":
         raise RuntimeError("Production mode requires an explicit RELAY_CORS_ORIGINS allow-list.")
     if "*" in cors_origins:
         raise RuntimeError("Production mode does not allow wildcard CORS origins.")
+    for origin in cors_origins:
+        try:
+            parsed_origin = urlsplit(origin)
+            parsed_origin.port  # Validate malformed ports before accepting the origin.
+        except ValueError as error:
+            raise RuntimeError(f"Invalid production CORS origin: {origin!r}.") from error
+        if (
+            "*" in origin
+            or any(character.isspace() for character in origin)
+            or parsed_origin.scheme.lower() != "https"
+            or not parsed_origin.hostname
+            or parsed_origin.path
+            or parsed_origin.query
+            or parsed_origin.fragment
+            or parsed_origin.username is not None
+            or parsed_origin.password is not None
+        ):
+            raise RuntimeError(
+                "Production CORS origins must be bare HTTPS origins without paths, credentials, or whitespace."
+            )
     if os.environ.get("RELAY_ALLOW_UNSAFE_SUBPROCESS", "false").strip().lower() == "true":
         raise RuntimeError("Production mode cannot enable RELAY_ALLOW_UNSAFE_SUBPROCESS.")
     sandbox_image = os.environ.get("RELAY_SANDBOX_IMAGE", "").strip()

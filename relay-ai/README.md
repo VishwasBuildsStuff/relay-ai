@@ -17,7 +17,7 @@ uvicorn main:app --host 127.0.0.1 --port 8000
 
 Running `python main.py` binds to `127.0.0.1` by default. To bind to a different interface, set `RELAY_HOST` to an IPv4 or IPv6 address literal and configure `RELAY_API_TOKEN` or `RELAY_AUTH_USERS_JSON`; the direct entry point refuses unauthenticated non-loopback binds.
 
-Set `RELAY_ENV=production` for deployment. Production mode requires shared-token or per-user authentication, an explicitly configured non-wildcard `RELAY_CORS_ORIGINS` allow-list, and keeps unsafe host-subprocess execution disabled. The systemd template enables this mode; configure the required values in its protected environment file.
+Set `RELAY_ENV=production` for deployment. Production mode requires shared-token or per-user authentication, an explicit `RELAY_CORS_ORIGINS` allow-list of bare HTTPS origins, and keeps unsafe host-subprocess execution disabled. The systemd template enables this mode; configure the required values in its protected environment file.
 
 The sandbox base image is pinned to the multi-platform Python 3.11.18 slim Trixie manifest digest, and pytest is pinned to 8.3.5. After building, capture the resulting image ID with `docker image inspect --format '{{.Id}}' relay-ai-sandbox:python3.11`; set `RELAY_SANDBOX_IMAGE` in the production environment file to that `sha256:...` ID. Docker accepts image IDs as run references, keeping production execution bound to the built image even if its local tag is later moved. See the [official Python image manifest](https://hub.docker.com/layers/library/python/3.11.18-slim-trixie/images/sha256-f09c9401a711dfa721dc0eae5ec111ccbb9ebc94575ad5f85a8359c7977da663) and [Docker image reference docs](https://docs.docker.com/engine/containers/run/#image-references).
 

@@ -11,20 +11,20 @@ Last updated: 2026-11-06 (Asia/Kolkata)
 
 ## Current milestone: Local end-to-end MVP — finishing durable operations, hardening, and product QA
 
-## Follow-on milestone: Single-host production readiness (3/10 complete)
+## Follow-on milestone: Single-host production readiness (4/10 complete)
 
 | ID | Task | Status | Evidence / next step |
 |---|---|---|---|
 | H1 | Enforce safe production startup configuration | DONE | `RELAY_ENV=production` requires authentication and explicit non-wildcard CORS origins, rejects unsafe host subprocess mode, and is enabled by the systemd template. Direct `python main.py` startup defaults to loopback and requires auth for non-loopback binds. |
 | H2 | Pin and document sandbox image provenance | DONE | Dockerfile pins the official Python 3.11.18 slim Trixie multi-platform digest and pytest 8.3.5; production mode requires a full local image ID or registry digest. Runbook captures the image ID after build. |
 | H3 | Define reverse-proxy deployment limits | DONE | Added Nginx TLS/proxy examples with body caps matching API routes, per-IP request/connection limits, timeouts, and overwritten forwarded headers. Uvicorn explicitly trusts only loopback. Multipart legacy `/tasks/submit` is now recognized by the backend body limiter. Host-specific Nginx syntax and real-IP configuration still require deployment-owner review. |
-| H4 | Verify authentication and CORS on the deployment host | TODO | Exercise viewer/operator ownership and browser-origin behavior with production configuration. |
+| H4 | Enforce production authentication and CORS configuration | DONE | Production mode already requires authentication and explicit CORS; it now validates every CORS entry as a bare HTTPS origin without credentials, wildcard, whitespace, path, query, or fragment. Host-side end-to-end auth/CORS verification remains in H10. |
 | H5 | Verify hostile archives and patch boundaries | TODO | Run request-level adversarial cases, including normalization collisions, special files, path traversal, and mismatched patch declarations. |
 | H6 | Verify sandbox isolation on the deployment host | TODO | Confirm network, filesystem, user, resource, and output limits against the installed Docker runtime and image. |
 | H7 | Verify worker concurrency and recovery | TODO | Exercise lease expiry, restart recovery, cancellation races, and bounded retry behavior. |
 | H8 | Rehearse configured Git target operations | TODO | Exercise stale-base rejection, changed-file-only apply/commit, and interrupted-operation recovery in a disposable repository. |
 | H9 | Complete backup restore and alerting drill | TODO | Restore an archive into isolation, inspect task history, and prove the backup-age failure reaches an assigned alert destination. |
-| H10 | Complete accessibility, load, and ownership review | TODO | Perform keyboard/screen-reader and load review; assign named operators, data-use approval, and service objectives before exposure. |
+| H10 | Complete release verification and ownership review | TODO | Verify auth/CORS and proxy behavior on the deployment host; perform keyboard/screen-reader and load review; assign named operators, data-use approval, and service objectives before exposure. |
 
 | ID | Task | Status | Evidence / next step |
 |---|---|---|---|
@@ -413,6 +413,10 @@ No tests have been run. `npm install`, `npm run build`, `npm run lint` (TypeScri
 - Added an Nginx TLS/upstream config and shared proxy-location snippet with 1 MiB general, 10 MiB JSON submit, and 27 MiB multipart caps, per-IP request/connection limits, and request/upstream timeouts. Forwarded address headers are overwritten at the edge; Uvicorn trusts only loopback. Docs call out trusted load-balancer CIDRs for deployments with another proxy hop.
 - Fixed the multipart body-limit path matching for the legacy `/tasks/submit` route. H3 is complete; production-readiness progress is 3/10.
 - `git diff --check` passed. No Nginx config validation or tests were run.
+
+### 2026-11-06 — Validate production CORS origins
+- Production startup now accepts only bare HTTPS CORS origins and rejects malformed URLs, wildcard characters, credentials, whitespace, and URL path/query/fragment components. Kept live browser-origin and auth-flow verification as a deployment-host release check under H10.
+- H4 is complete; production-readiness progress is 4/10. No tests were added or run.
 
 ### 2026-11-05 — Default direct API startup to localhost
 - Changed `python main.py` to bind to `127.0.0.1` by default, require an IP literal for `RELAY_HOST`, and refuse non-loopback binds unless shared-token or per-user authentication is configured. Disabled auto-reload in this entry point.
