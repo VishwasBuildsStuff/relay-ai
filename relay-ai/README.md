@@ -27,6 +27,8 @@ The service stores task results and source snapshots in `relay_tasks.sqlite3` by
 
 ## Endpoints
 
+For a production Nginx example, install [`relay-ai.conf`](../deploy/nginx/relay-ai.conf) plus [`relay-ai-proxy-location.conf`](../deploy/nginx/relay-ai-proxy-location.conf). The proxy's general, JSON, and multipart limits are 1 MiB, 10 MiB, and 27 MiB respectively, matching the ASGI caps with 1 MiB reserved for multipart framing. It also sets request-rate, connection, and timeout limits; the API enforces stricter route-specific caps itself.
+
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/` | Service status and docs link |

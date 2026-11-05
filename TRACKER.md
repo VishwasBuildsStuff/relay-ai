@@ -1,6 +1,6 @@
 # RELAY AI Build Tracker
 
-Last updated: 2026-11-05 (Asia/Kolkata)
+Last updated: 2026-11-06 (Asia/Kolkata)
 
 ## Status key
 
@@ -11,13 +11,13 @@ Last updated: 2026-11-05 (Asia/Kolkata)
 
 ## Current milestone: Local end-to-end MVP — finishing durable operations, hardening, and product QA
 
-## Follow-on milestone: Single-host production readiness (2/10 complete)
+## Follow-on milestone: Single-host production readiness (3/10 complete)
 
 | ID | Task | Status | Evidence / next step |
 |---|---|---|---|
 | H1 | Enforce safe production startup configuration | DONE | `RELAY_ENV=production` requires authentication and explicit non-wildcard CORS origins, rejects unsafe host subprocess mode, and is enabled by the systemd template. Direct `python main.py` startup defaults to loopback and requires auth for non-loopback binds. |
 | H2 | Pin and document sandbox image provenance | DONE | Dockerfile pins the official Python 3.11.18 slim Trixie multi-platform digest and pytest 8.3.5; production mode requires a full local image ID or registry digest. Runbook captures the image ID after build. |
-| H3 | Define reverse-proxy deployment limits | TODO | Document and configure body, connection, timeout, and forwarded-header policy for the chosen proxy. |
+| H3 | Define reverse-proxy deployment limits | DONE | Added Nginx TLS/proxy examples with body caps matching API routes, per-IP request/connection limits, timeouts, and overwritten forwarded headers. Uvicorn explicitly trusts only loopback. Multipart legacy `/tasks/submit` is now recognized by the backend body limiter. Host-specific Nginx syntax and real-IP configuration still require deployment-owner review. |
 | H4 | Verify authentication and CORS on the deployment host | TODO | Exercise viewer/operator ownership and browser-origin behavior with production configuration. |
 | H5 | Verify hostile archives and patch boundaries | TODO | Run request-level adversarial cases, including normalization collisions, special files, path traversal, and mismatched patch declarations. |
 | H6 | Verify sandbox isolation on the deployment host | TODO | Confirm network, filesystem, user, resource, and output limits against the installed Docker runtime and image. |
@@ -408,6 +408,11 @@ No tests have been run. `npm install`, `npm run build`, `npm run lint` (TypeScri
 - Pinned the sandbox base to the official Python 3.11.18 slim Trixie multi-platform manifest digest and made the pytest install invocation explicit. Production mode now rejects mutable sandbox tags and requires an image ID or repository digest.
 - Documented image ID capture and production configuration in the API setup guide, root README, and systemd runbook. H2 is complete; production-readiness progress is 2/10.
 - No tests or image builds were run.
+
+### 2026-11-06 — Add a bounded Nginx reverse-proxy template
+- Added an Nginx TLS/upstream config and shared proxy-location snippet with 1 MiB general, 10 MiB JSON submit, and 27 MiB multipart caps, per-IP request/connection limits, and request/upstream timeouts. Forwarded address headers are overwritten at the edge; Uvicorn trusts only loopback. Docs call out trusted load-balancer CIDRs for deployments with another proxy hop.
+- Fixed the multipart body-limit path matching for the legacy `/tasks/submit` route. H3 is complete; production-readiness progress is 3/10.
+- `git diff --check` passed. No Nginx config validation or tests were run.
 
 ### 2026-11-05 — Default direct API startup to localhost
 - Changed `python main.py` to bind to `127.0.0.1` by default, require an IP literal for `RELAY_HOST`, and refuse non-loopback binds unless shared-token or per-user authentication is configured. Disabled auto-reload in this entry point.

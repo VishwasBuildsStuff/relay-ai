@@ -90,7 +90,7 @@ class RequestBodyLimitMiddleware:
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         content_type = headers.get(b"content-type", b"").lower()
         path = scope.get("path", "")
-        if path.endswith("/upload") and content_type.startswith(b"multipart/form-data"):
+        if path.endswith(("/upload", "/tasks/submit")) and content_type.startswith(b"multipart/form-data"):
             max_bytes = MAX_MULTIPART_REQUEST_BYTES
         elif content_type.startswith(b"application/json"):
             max_bytes = MAX_JSON_REQUEST_BYTES
