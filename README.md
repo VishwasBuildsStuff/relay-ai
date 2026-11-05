@@ -11,7 +11,7 @@ Requirements: Node.js, Python 3.11+, Git, and (for isolated code execution) Dock
 1. Install frontend dependencies with `npm install`.
 2. Create a Python environment in `relay-ai/` and install `pip install -r requirements.txt`.
 3. Configure `GEMINI_API_KEY` in the backend environment. The provider defaults to `gemini-2.5-flash` and can be changed with `GEMINI_MODEL`.
-4. Build the sandbox image: `docker build -t relay-ai-sandbox:python3.11 relay-ai/sandbox`.
+4. Build the sandbox image: `docker build -t relay-ai-sandbox:python3.11 relay-ai/sandbox`. For production, capture its immutable ID with `docker image inspect --format '{{.Id}}' relay-ai-sandbox:python3.11` and set `RELAY_SANDBOX_IMAGE` to that `sha256:...` value.
 5. Start the API from `relay-ai/`: `uvicorn main:app --host 127.0.0.1 --port 8000`. Running `python main.py` also binds to localhost by default; set `RELAY_HOST` to an IP address for another interface and configure `RELAY_API_TOKEN` or `RELAY_AUTH_USERS_JSON` before doing so.
 6. Start the dashboard from the repository root: `npm run dev`.
 

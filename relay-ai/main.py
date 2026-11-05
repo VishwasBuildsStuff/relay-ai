@@ -19,6 +19,7 @@ import zipfile
 import datetime
 import json
 import ipaddress
+import re
 from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
@@ -166,6 +167,11 @@ if RELAY_ENV == "production":
         raise RuntimeError("Production mode does not allow wildcard CORS origins.")
     if os.environ.get("RELAY_ALLOW_UNSAFE_SUBPROCESS", "false").strip().lower() == "true":
         raise RuntimeError("Production mode cannot enable RELAY_ALLOW_UNSAFE_SUBPROCESS.")
+    sandbox_image = os.environ.get("RELAY_SANDBOX_IMAGE", "").strip()
+    if not re.fullmatch(r"(?:sha256:[0-9a-f]{64}|[^@\s]+@sha256:[0-9a-f]{64})", sandbox_image):
+        raise RuntimeError(
+            "Production mode requires RELAY_SANDBOX_IMAGE to be a SHA-256 image ID or repository digest."
+        )
 
 
 @app.middleware("http")

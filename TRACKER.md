@@ -11,12 +11,12 @@ Last updated: 2026-11-05 (Asia/Kolkata)
 
 ## Current milestone: Local end-to-end MVP — finishing durable operations, hardening, and product QA
 
-## Follow-on milestone: Single-host production readiness (1/10 complete)
+## Follow-on milestone: Single-host production readiness (2/10 complete)
 
 | ID | Task | Status | Evidence / next step |
 |---|---|---|---|
 | H1 | Enforce safe production startup configuration | DONE | `RELAY_ENV=production` requires authentication and explicit non-wildcard CORS origins, rejects unsafe host subprocess mode, and is enabled by the systemd template. Direct `python main.py` startup defaults to loopback and requires auth for non-loopback binds. |
-| H2 | Pin and document sandbox image provenance | TODO | Select a maintained image digest, record build inputs, and document the update process. |
+| H2 | Pin and document sandbox image provenance | DONE | Dockerfile pins the official Python 3.11.18 slim Trixie multi-platform digest and pytest 8.3.5; production mode requires a full local image ID or registry digest. Runbook captures the image ID after build. |
 | H3 | Define reverse-proxy deployment limits | TODO | Document and configure body, connection, timeout, and forwarded-header policy for the chosen proxy. |
 | H4 | Verify authentication and CORS on the deployment host | TODO | Exercise viewer/operator ownership and browser-origin behavior with production configuration. |
 | H5 | Verify hostile archives and patch boundaries | TODO | Run request-level adversarial cases, including normalization collisions, special files, path traversal, and mismatched patch declarations. |
@@ -403,6 +403,11 @@ No tests have been run. `npm install`, `npm run build`, `npm run lint` (TypeScri
 - Added `RELAY_ENV=production` startup checks requiring authentication and explicit non-wildcard CORS origins, and rejecting unsafe host-subprocess mode. The systemd service template enables production mode; setup docs explain required configuration.
 - Added a separate 10-task production-readiness phase so the completed 19-item local MVP and operator-dependent release gates are tracked independently. H1 is complete (1/10); H2–H10 require deployment-specific work or execution-level verification.
 - No tests were added or run.
+
+### 2026-11-05 — Pin sandbox image provenance
+- Pinned the sandbox base to the official Python 3.11.18 slim Trixie multi-platform manifest digest and made the pytest install invocation explicit. Production mode now rejects mutable sandbox tags and requires an image ID or repository digest.
+- Documented image ID capture and production configuration in the API setup guide, root README, and systemd runbook. H2 is complete; production-readiness progress is 2/10.
+- No tests or image builds were run.
 
 ### 2026-11-05 — Default direct API startup to localhost
 - Changed `python main.py` to bind to `127.0.0.1` by default, require an IP literal for `RELAY_HOST`, and refuse non-loopback binds unless shared-token or per-user authentication is configured. Disabled auto-reload in this entry point.
