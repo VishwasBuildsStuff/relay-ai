@@ -1,0 +1,15 @@
+[Unit]
+Description=Check RELAY AI backup age
+
+[Service]
+Type=oneshot
+User=relay-ai
+Group=relay-ai
+WorkingDirectory=/opt/relay-ai/relay-ai
+ExecStart=/opt/relay-ai/relay-ai/.venv/bin/python /opt/relay-ai/relay-ai/backup.py --check-latest /secure/backups/relay-ai --max-age-hours 26
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/secure/backups/relay-ai

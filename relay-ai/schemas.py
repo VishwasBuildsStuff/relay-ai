@@ -6,14 +6,20 @@ Strict Pydantic v2 schemas for all state transitions, AI outputs, and execution 
 from __future__ import annotations
 
 from enum import Enum
-from pathlib import PurePosixPath
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from path_utils import normalize_snapshot_paths
 
 
 class PipelineStatus(str, Enum):
     """Explicit pipeline state machine states."""
     RECEIVED = "RECEIVED"
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    TRIAGING = "TRIAGING"
+    INVESTIGATING = "INVESTIGATING"
+    SANDBOX_RUNNING = "SANDBOX_RUNNING"
+    REVIEWING = "REVIEWING"
     TRIAGED = "TRIAGED"
     INVESTIGATED = "INVESTIGATED"
     PATCHED = "PATCHED"
@@ -28,11 +34,32 @@ class PipelineStatus(str, Enum):
     FAILED = "FAILED"
 
 
+_ALLOWED_STATUS_TRANSITIONS = {
+    PipelineStatus.RECEIVED: {PipelineStatus.QUEUED, PipelineStatus.RUNNING, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.QUEUED: {PipelineStatus.RUNNING, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.RUNNING: {PipelineStatus.TRIAGING, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.TRIAGING: {PipelineStatus.TRIAGED, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.TRIAGED: {PipelineStatus.INVESTIGATING, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.INVESTIGATING: {PipelineStatus.INVESTIGATED, PipelineStatus.PATCHED, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.INVESTIGATED: {PipelineStatus.PATCHED, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.PATCHED: {PipelineStatus.SANDBOX_RUNNING, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.SANDBOX_RUNNING: {PipelineStatus.SANDBOX_TESTED, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.SANDBOX_TESTED: {PipelineStatus.REVIEWING, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.REVIEWING: {PipelineStatus.AWAITING_HUMAN_APPROVAL, PipelineStatus.CANCELLED, PipelineStatus.FAILED},
+    PipelineStatus.REVIEWED: {PipelineStatus.AWAITING_HUMAN_APPROVAL, PipelineStatus.APPROVED, PipelineStatus.REJECTED},
+    PipelineStatus.AWAITING_HUMAN_APPROVAL: {PipelineStatus.APPROVED, PipelineStatus.REJECTED, PipelineStatus.CANCELLED},
+    PipelineStatus.APPROVED: {PipelineStatus.APPLIED},
+    PipelineStatus.APPLIED: {PipelineStatus.COMMITTED},
+    PipelineStatus.FAILED: {PipelineStatus.QUEUED},
+}
+
+
 SeverityLevel = Literal["low", "medium", "high", "critical"]
 SecurityAssessment = Literal["PASS", "WARN", "FAIL"]
 ReviewRecommendation = Literal["APPROVE", "REJECT", "REVISE"]
 IsolationMode = Literal["docker", "subprocess_dev", "unavailable"]
 TaskActionType = Literal["approve", "reject", "apply", "commit", "cancel", "retry"]
+MAX_MODEL_INPUT_BYTES = 1_500_000
 
 
 class ReportRequest(BaseModel):
@@ -42,12 +69,18 @@ class ReportRequest(BaseModel):
     chat_message: str = Field(
         ...,
         min_length=5,
+        max_length=20_000,
         description="Natural-language bug report, webhook payload, or user issue description."
     )
     codebase: Dict[str, str] = Field(
         ...,
         min_length=1,
         description="Mapping of relative file paths to UTF-8 file contents."
+    )
+    repository_id: Optional[str] = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+        description="Optional operator-configured local Git repository target.",
     )
 
     @model_validator(mode="before")
@@ -59,20 +92,21 @@ class ReportRequest(BaseModel):
             if isinstance(codebase, dict):
                 if len(codebase) > 500:
                     raise ValueError("Codebase contains more than 500 files.")
-                total_bytes = 0
+                if not all(isinstance(name, str) and isinstance(content, str) for name, content in codebase.items()):
+                    return obj
+                codebase = normalize_snapshot_paths(codebase)
+                obj = dict(obj)
+                obj["codebase"] = codebase
+                report = obj.get("chat_message", "")
+                total_bytes = len(report.encode("utf-8")) if isinstance(report, str) else 0
                 for name, content in codebase.items():
-                    if not isinstance(name, str) or not isinstance(content, str):
-                        continue
-                    normalized = name.replace("\\", "/")
-                    path = PurePosixPath(normalized)
-                    if (path.is_absolute() or any(part in ("..", ".", "") for part in normalized.split("/"))
-                            or ".git" in path.parts):
-                        raise ValueError(f"Unsafe codebase path: {name!r}")
                     if len(content.encode("utf-8")) > 2 * 1024 * 1024:
                         raise ValueError(f"File exceeds 2 MiB limit: {name!r}")
-                    total_bytes += len(content.encode("utf-8"))
+                    total_bytes += len(name.encode("utf-8")) + len(content.encode("utf-8"))
                 if total_bytes > 25 * 1024 * 1024:
-                    raise ValueError("Codebase exceeds 25 MiB total limit.")
+                    raise ValueError("Request exceeds the 25 MiB snapshot limit.")
+                if total_bytes > MAX_MODEL_INPUT_BYTES:
+                    raise ValueError("Report and codebase exceed the 1.5 MB model input limit.")
         return obj
 
 
@@ -169,12 +203,14 @@ class ReviewResult(BaseModel):
 
 
 class EvidenceEvent(BaseModel):
-    """Chronological event logged during pipeline execution."""
+    """Append-only event with actor and task correlation metadata."""
     model_config = ConfigDict(extra="allow")
 
     timestamp: str
     stage: str
     status: str
+    actor: str = "system"
+    correlation_id: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -203,6 +239,7 @@ class PipelineTaskResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_id: str
+    owner_id: Optional[str] = None
     status: PipelineStatus
     current_stage: str
     bug_report: str
@@ -221,3 +258,23 @@ class PipelineTaskResponse(BaseModel):
     is_committed: bool = False
     commit_hash: Optional[str] = None
     commit_message: Optional[str] = None
+    repository_id: Optional[str] = None
+    repository_base_revision: Optional[str] = None
+    repository_applied_digest: Optional[str] = None
+    repository_result_revision: Optional[str] = None
+    repository_operation_state: Optional[str] = None
+
+    def transition_to(self, new_status: PipelineStatus, recovery: bool = False) -> None:
+        """Move through the centralized task lifecycle graph; same-state updates are idempotent."""
+        if self.status == new_status:
+            return
+        allowed = _ALLOWED_STATUS_TRANSITIONS.get(self.status, set())
+        if recovery and new_status == PipelineStatus.RUNNING and self.status in {
+            PipelineStatus.TRIAGING, PipelineStatus.TRIAGED, PipelineStatus.INVESTIGATING,
+            PipelineStatus.INVESTIGATED, PipelineStatus.PATCHED, PipelineStatus.SANDBOX_RUNNING,
+            PipelineStatus.SANDBOX_TESTED, PipelineStatus.REVIEWING,
+        }:
+            allowed = {*allowed, PipelineStatus.RUNNING}
+        if new_status not in allowed:
+            raise ValueError(f"Invalid task status transition: {self.status.value} -> {new_status.value}{' during recovery' if recovery else ''}.")
+        self.status = new_status

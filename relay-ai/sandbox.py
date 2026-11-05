@@ -7,18 +7,19 @@ with Docker isolation when available and a sanitized subprocess dev-runner fallb
 from __future__ import annotations
 
 import os
+import resource
 import shutil
 import shlex
 import subprocess
 import sys
 import tempfile
-import tempfile
 import time
 import uuid
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Dict, Optional, Tuple
 
+from path_utils import normalize_relative_path
+from redaction import redact_sensitive_text
 from schemas import IsolationMode, SandboxExecutionResult
 
 
@@ -38,6 +39,15 @@ class SandboxRunner:
         self.docker_available = self._detect_docker()
         self.allow_unsafe_subprocess = os.environ.get("RELAY_ALLOW_UNSAFE_SUBPROCESS", "false").lower() == "true"
         self.docker_image = os.environ.get("RELAY_SANDBOX_IMAGE", "relay-ai-sandbox:python3.11")
+        profile = os.environ.get("RELAY_TEST_PROFILE", "pytest").strip().lower()
+        profiles = {
+            "pytest": ["python", "-m", "pytest", "-p", "no:cacheprovider", "-v"],
+            "unittest": ["python", "-m", "unittest", "discover", "-v"],
+        }
+        if profile not in profiles:
+            raise ValueError(f"Unsupported RELAY_TEST_PROFILE '{profile}'. Choose one of: {', '.join(profiles)}.")
+        self.test_profile = profile
+        self.test_argv = profiles[profile]
         self.sandbox_image_available = self._detect_sandbox_image()
 
     def _detect_docker(self) -> bool:
@@ -74,9 +84,15 @@ class SandboxRunner:
     def _read_output(stream, limit: int = 1024 * 1024) -> str:
         stream.seek(0)
         data = stream.read(limit + 1)
-        clipped = len(data) > limit
-        text = data[:limit].decode("utf-8", errors="replace")
+        clipped = len(data) > limit or stream.tell() >= limit
+        text = redact_sensitive_text(data[:limit].decode("utf-8", errors="replace"))
         return text + ("\n[output truncated at 1 MiB]" if clipped else "")
+
+    @staticmethod
+    def _limit_child_file_output() -> None:
+        """Cap each captured output file and disable core dumps for the child tree."""
+        resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     def _execute_bounded(self, command, cwd: str, timeout: int, env=None) -> Tuple[int, str, str]:
         """Run a process with bounded in-memory output and a hard wall-clock timeout."""
@@ -88,6 +104,7 @@ class SandboxRunner:
                     env=env,
                     stdout=stdout_file,
                     stderr=stderr_file,
+                    preexec_fn=self._limit_child_file_output if os.name == "posix" else None,
                 )
                 try:
                     exit_code = process.wait(timeout=timeout)
@@ -105,7 +122,7 @@ class SandboxRunner:
                     )
                 return exit_code, self._read_output(stdout_file), self._read_output(stderr_file)
             except Exception as e:
-                return 1, "", f"Execution failed: {str(e)}"
+                return 1, "", redact_sensitive_text(f"Execution failed: {str(e)}")
 
     @property
     def isolation_mode(self) -> IsolationMode:
@@ -118,11 +135,13 @@ class SandboxRunner:
         Validates the proposed unified diff using native `git apply --check`.
         Returns (is_valid, error_message).
         """
-        patch_file = repo_dir / ".relay_candidate.patch"
+        patch_file = None
         try:
             # Ensure newline at end of patch
             clean_patch = unified_diff if unified_diff.endswith("\n") else unified_diff + "\n"
-            patch_file.write_text(clean_patch, encoding="utf-8")
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".patch", delete=False) as handle:
+                handle.write(clean_patch)
+                patch_file = Path(handle.name)
             result = subprocess.run(
                 ["git", "apply", "--check", "--recount", str(patch_file)],
                 cwd=str(repo_dir),
@@ -132,48 +151,79 @@ class SandboxRunner:
             )
             if result.returncode == 0:
                 return True, None
-            return False, result.stderr or result.stdout or "git apply --check failed with non-zero exit code"
+            return False, redact_sensitive_text(result.stderr or result.stdout or "git apply --check failed with non-zero exit code")
         except subprocess.TimeoutExpired:
             return False, "git apply --check timed out after 10s"
         except Exception as e:
-            return False, f"Patch validation error: {str(e)}"
+            return False, redact_sensitive_text(f"Patch validation error: {str(e)}")
         finally:
-            if patch_file.exists():
+            if patch_file and patch_file.exists():
                 patch_file.unlink(missing_ok=True)
 
-    def validate_patch_scope(self, unified_diff: str, declared_files: Optional[list[str]] = None) -> Tuple[bool, Optional[str]]:
-        """Require diff headers to stay on safe relative paths and match declared changed files."""
+    def validate_patch_scope(
+        self,
+        unified_diff: str,
+        declared_files: Optional[list[str]] = None,
+        source_files: Optional[set[str] | list[str]] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """Require every patch header to name the same safe, existing source file."""
         targets = set()
         try:
-            for line in unified_diff.splitlines():
+            lines = unified_diff.splitlines()
+            for index, line in enumerate(lines):
                 if not line.startswith("diff --git "):
                     continue
                 parts = shlex.split(line)
                 if len(parts) != 4 or not parts[2].startswith("a/") or not parts[3].startswith("b/"):
                     return False, "Malformed diff header."
-                target = parts[3][2:]
-                path = PurePosixPath(target)
-                if (path.is_absolute() or any(part in ("", ".", "..") for part in target.split("/"))
-                        or ".git" in path.parts or (path.parts and path.parts[0].endswith(":"))):
+                old_target, target = parts[2][2:], parts[3][2:]
+                if old_target != target:
+                    return False, "Patch may only modify existing files; additions, deletions, and renames are not supported."
+                try:
+                    normalized_target, _ = normalize_relative_path(target)
+                except ValueError:
                     return False, f"Unsafe patch target path: {target!r}"
+                if normalized_target != target:
+                    return False, f"Patch target path is not in canonical form: {target!r}"
+                file_headers = [item for item in lines[index + 1:] if item.startswith(("--- ", "+++ "))]
+                if len(file_headers) < 2:
+                    return False, f"Patch is missing unified file headers for {target!r}."
+                try:
+                    old_header = shlex.split(file_headers[0][4:])
+                    new_header = shlex.split(file_headers[1][4:])
+                except ValueError:
+                    return False, f"Malformed unified file headers for {target!r}."
+                if old_header != [f"a/{target}"] or new_header != [f"b/{target}"]:
+                    return False, f"Unified file headers do not match diff target {target!r}."
                 targets.add(target)
             if not targets:
                 return False, "Patch has no diff file headers."
-            declared = {name.replace("\\", "/") for name in declared_files or []}
-            if declared_files is not None and targets != declared:
-                return False, "Diff targets do not match the declared files_changed list."
+            if len(targets) > 25:
+                return False, "Patch exceeds the 25-file change limit."
+            if declared_files is not None:
+                declared_list = [name.replace("\\", "/") for name in declared_files]
+                declared = set(declared_list)
+                if len(declared) != len(declared_list) or targets != declared:
+                    return False, "Diff targets do not match the declared files_changed list."
+            if source_files is not None:
+                normalized_sources = {name.replace("\\", "/") for name in source_files}
+                missing = targets - normalized_sources
+                if missing:
+                    return False, f"Patch targets files outside the submitted source snapshot: {sorted(missing)}"
             return True, None
         except ValueError as error:
-            return False, f"Could not parse diff headers: {error}"
+            return False, redact_sensitive_text(f"Could not parse diff headers: {error}")
 
     def apply_patch(self, repo_dir: Path, unified_diff: str) -> Tuple[bool, Optional[str]]:
         """
         Applies the unified diff directly using `git apply`.
         """
-        patch_file = repo_dir / ".relay_candidate.patch"
+        patch_file = None
         try:
             clean_patch = unified_diff if unified_diff.endswith("\n") else unified_diff + "\n"
-            patch_file.write_text(clean_patch, encoding="utf-8")
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".patch", delete=False) as handle:
+                handle.write(clean_patch)
+                patch_file = Path(handle.name)
             result = subprocess.run(
                 ["git", "apply", "--recount", str(patch_file)],
                 cwd=str(repo_dir),
@@ -183,30 +233,31 @@ class SandboxRunner:
             )
             if result.returncode == 0:
                 return True, None
-            return False, result.stderr or result.stdout or "git apply failed"
+            return False, redact_sensitive_text(result.stderr or result.stdout or "git apply failed")
         except Exception as e:
-            return False, f"Failed to apply patch: {str(e)}"
+            return False, redact_sensitive_text(f"Failed to apply patch: {str(e)}")
         finally:
-            if patch_file.exists():
+            if patch_file and patch_file.exists():
                 patch_file.unlink(missing_ok=True)
 
     def run_tests(
         self,
         codebase: Dict[str, str],
         unified_diff: Optional[str] = None,
-        test_command: str = "pytest -v",
         expected_files: Optional[list[str]] = None,
     ) -> SandboxExecutionResult:
         """
         Populates an isolated workspace, initializes Git, applies patch (if supplied),
-        runs pytest, and gathers complete execution telemetry.
+        runs the configured allow-listed test profile, and gathers execution telemetry.
         """
         start_time = time.perf_counter()
         workspace_dir = Path(tempfile.mkdtemp(prefix="relay_sandbox_"))
+        test_argv = self.test_argv
+        test_command = " ".join(test_argv)
 
         try:
             if unified_diff and unified_diff.strip():
-                in_scope, scope_error = self.validate_patch_scope(unified_diff, expected_files)
+                in_scope, scope_error = self.validate_patch_scope(unified_diff, expected_files, set(codebase))
                 if not in_scope:
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
                     return SandboxExecutionResult(
@@ -264,9 +315,9 @@ class SandboxRunner:
             # 4. Execute test command
             mode = self.isolation_mode
             if self.sandbox_image_available:
-                exit_code, stdout, stderr = self._run_in_docker(workspace_dir, test_command)
+                exit_code, stdout, stderr = self._run_in_docker(workspace_dir, test_argv)
             elif self.allow_unsafe_subprocess:
-                exit_code, stdout, stderr = self._run_in_subprocess(workspace_dir, test_command)
+                exit_code, stdout, stderr = self._run_in_subprocess(workspace_dir, test_argv)
             else:
                 exit_code, stdout, stderr = 125, "", (
                     "The isolated Docker runner or prebuilt image is unavailable. Tests were not executed. "
@@ -295,16 +346,15 @@ class SandboxRunner:
     def _populate_workspace(self, target_dir: Path, codebase: Dict[str, str]) -> None:
         """Writes files into target_dir while enforcing path containment."""
         resolved_root = target_dir.resolve()
-        for rel_path, content in codebase.items():
-            # Security: reject absolute paths and traversal before writing.
-            normalized = rel_path.replace("\\", "/")
+        try:
+            normalized_codebase = normalize_snapshot_paths(codebase)
+        except ValueError as error:
+            raise SandboxSecurityError(str(error)) from error
+        for normalized, content in normalized_codebase.items():
             candidate = Path(normalized)
-            if (candidate.is_absolute() or any(part in ("..", ".", "") for part in normalized.split("/"))
-                    or ".git" in candidate.parts):
-                raise SandboxSecurityError(f"Unsafe relative path: '{rel_path}'")
             file_dest = (resolved_root / candidate).resolve()
             if not file_dest.is_relative_to(resolved_root):
-                raise SandboxSecurityError(f"Directory traversal detected: '{rel_path}' escapes sandbox root")
+                raise SandboxSecurityError(f"Directory traversal detected: '{normalized}' escapes sandbox root")
 
             file_dest.parent.mkdir(parents=True, exist_ok=True)
             file_dest.write_text(content, encoding="utf-8")
@@ -317,7 +367,7 @@ class SandboxRunner:
         subprocess.run(["git", "add", "."], cwd=str(repo_dir), stdout=subprocess.DEVNULL, check=True)
         subprocess.run(["git", "commit", "-m", "Initial sandbox commit", "--allow-empty"], cwd=str(repo_dir), stdout=subprocess.DEVNULL, check=True)
 
-    def _run_in_subprocess(self, workspace_dir: Path, command: str) -> Tuple[int, str, str]:
+    def _run_in_subprocess(self, workspace_dir: Path, command: list[str]) -> Tuple[int, str, str]:
         """
         Executes test command in a local subprocess with sanitized environment.
         Clearly labeled as 'subprocess_dev' (development fallback only).
@@ -342,17 +392,16 @@ class SandboxRunner:
         for secret_key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "GITHUB_TOKEN"]:
             safe_env.pop(secret_key, None)
 
-        cmd_parts = command.split()
-        # Translate 'pytest' to current Python executable's pytest module to guarantee correct interpreter
-        if cmd_parts and cmd_parts[0] in ("pytest", "py.test"):
-            cmd_parts = [sys.executable, "-m", "pytest"] + cmd_parts[1:]
+        cmd_parts = list(command)
+        if cmd_parts[:2] == ["python", "-m"]:
+            cmd_parts[0] = sys.executable
 
         try:
             return self._execute_bounded(cmd_parts, str(workspace_dir), self.timeout_seconds, env=safe_env)
         except Exception as e:
-            return 1, "", f"Execution failed: {str(e)}"
+            return 1, "", redact_sensitive_text(f"Execution failed: {str(e)}")
 
-    def _run_in_docker(self, workspace_dir: Path, command: str) -> Tuple[int, str, str]:
+    def _run_in_docker(self, workspace_dir: Path, command: list[str]) -> Tuple[int, str, str]:
         """
         Executes test suite inside an isolated Docker container with zero network access.
         """
@@ -375,9 +424,9 @@ class SandboxRunner:
             "-v", f"{workspace_dir}:/workspace:ro",
             "-w", "/workspace",
             self.docker_image,
-            "sh", "-c", command,
+            *command,
         ]
         try:
             return self._execute_bounded(docker_cmd, str(workspace_dir), self.timeout_seconds + 15)
         except Exception as e:
-            return 1, "", f"Docker execution error: {str(e)}"
+            return 1, "", redact_sensitive_text(f"Docker execution error: {str(e)}")

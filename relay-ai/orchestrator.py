@@ -9,12 +9,15 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import time
 from typing import Any, Callable, Dict, Optional
 
 from google.genai.errors import APIError
 
 from sandbox import SandboxRunner
 from providers import GeminiStructuredProvider, StructuredProvider
+from redaction import redact_sensitive_text
+from pricing import configured_gemini_pricing, estimate_gemini_cost_usd
 from schemas import (
     EvidenceEvent,
     InvestigationAndPatchResult,
@@ -36,22 +39,35 @@ class RelayOrchestrator:
         self.model_name = model_name or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         api_key = os.environ.get("GEMINI_API_KEY")
         self.provider = provider or (GeminiStructuredProvider(api_key, self.model_name) if api_key else None)
+        self.gemini_pricing = configured_gemini_pricing()
         self.sandbox = SandboxRunner()
 
     def _now(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    def _log_event(self, task: PipelineTaskResponse, stage: str, status: str, details: Optional[Dict[str, Any]] = None) -> None:
+    def _log_event(
+        self, task: PipelineTaskResponse, stage: str, status: str,
+        details: Optional[Dict[str, Any]] = None, actor: str = "system",
+    ) -> None:
         event = EvidenceEvent(
             timestamp=self._now(),
             stage=stage,
             status=status,
+            actor=actor,
+            correlation_id=task.task_id,
             details=details or {},
         )
         task.evidence_timeline.append(event)
         task.updated_at = self._now()
 
-    def _call_gemini_structured(self, system_instruction: str, prompt: str, schema_cls: Any) -> Any:
+    def _call_gemini_structured(
+        self,
+        task: PipelineTaskResponse,
+        stage: str,
+        system_instruction: str,
+        prompt: str,
+        schema_cls: Any,
+    ) -> Any:
         """
         Executes a structured JSON call using official google-genai SDK with Pydantic schema.
         Handles APIError and quota limits safely.
@@ -60,7 +76,31 @@ class RelayOrchestrator:
             raise RuntimeError(
                 "GEMINI_API_KEY environment variable is not set. Please configure GEMINI_API_KEY to run AI stages."
             )
-        return self.provider.generate(system_instruction, prompt, schema_cls)
+        result = self.provider.generate(system_instruction, prompt, schema_cls)
+        usage = getattr(self.provider, "last_usage", None)
+        if usage is not None:
+            usage_details = {
+                "provider": "gemini",
+                "model": self.model_name,
+                "stage": stage,
+                **usage,
+            }
+            if self.gemini_pricing is not None:
+                input_rate, output_rate, label = self.gemini_pricing
+                usage_details.update({
+                    "input_usd_per_million": str(input_rate),
+                    "output_usd_per_million": str(output_rate),
+                    "estimated_cost_usd": str(estimate_gemini_cost_usd(
+                        int(usage.get("prompt_tokens", 0)),
+                        int(usage.get("candidate_tokens", 0)),
+                        self.gemini_pricing,
+                    )),
+                    "pricing_label": label,
+                })
+            self._log_event(task, "MODEL_USAGE", "RECORDED", {
+                **usage_details,
+            })
+        return result
 
     async def run(
         self,
@@ -77,14 +117,14 @@ class RelayOrchestrator:
         now = self._now()
         task = PipelineTaskResponse(
             task_id=task_id,
-            status=PipelineStatus.RECEIVED,
+            status=PipelineStatus.RUNNING,
             current_stage="RECEIVED",
             bug_report=request.chat_message,
             created_at=now,
             updated_at=now,
             evidence_timeline=[],
         )
-        self._log_event(task, "INGESTION", "RECEIVED", {"files_count": len(request.codebase)})
+        self._log_event(task, "INGESTION", "STARTED", {"files_count": len(request.codebase)})
         if on_progress:
             on_progress(task)
 
@@ -94,7 +134,9 @@ class RelayOrchestrator:
         # -------------------------------------------------------------
         # STAGE A: TRIAGE AGENT
         # -------------------------------------------------------------
+        task.transition_to(PipelineStatus.TRIAGING)
         task.current_stage = "STAGE_A_TRIAGE"
+        triage_started = time.perf_counter()
         self._log_event(task, "STAGE_A_TRIAGE", "IN_PROGRESS")
         if on_progress:
             on_progress(task)
@@ -117,17 +159,22 @@ Produce a structured TriageResult with:
 """
         try:
             triage_result: TriageResult = self._call_gemini_structured(
+                task=task,
+                stage="STAGE_A_TRIAGE",
                 system_instruction="You are a senior triage engineer. Classify severity and define strict acceptance criteria.",
                 prompt=triage_prompt,
                 schema_cls=TriageResult,
             )
             task.triage = triage_result
-            task.status = PipelineStatus.TRIAGED
-            self._log_event(task, "STAGE_A_TRIAGE", "COMPLETED", triage_result.model_dump())
+            task.transition_to(PipelineStatus.TRIAGED)
+            self._log_event(task, "STAGE_A_TRIAGE", "COMPLETED", {
+                **triage_result.model_dump(),
+                "duration_ms": round((time.perf_counter() - triage_started) * 1000, 2),
+            })
             if on_progress:
                 on_progress(task)
         except Exception as e:
-            return self._handle_failure(task, "STAGE_A_TRIAGE", e, on_progress)
+            return self._handle_failure(task, "STAGE_A_TRIAGE", e, on_progress, round((time.perf_counter() - triage_started) * 1000, 2))
 
         if should_cancel and should_cancel():
             return self._handle_cancellation(task, "STAGE_A_TRIAGE", on_progress)
@@ -135,7 +182,9 @@ Produce a structured TriageResult with:
         # -------------------------------------------------------------
         # STAGE B: INVESTIGATION & DEVELOPMENT AGENT
         # -------------------------------------------------------------
+        task.transition_to(PipelineStatus.INVESTIGATING)
         task.current_stage = "STAGE_B_INVESTIGATION_AND_DEV"
+        investigation_started = time.perf_counter()
         self._log_event(task, "STAGE_B_INVESTIGATION_AND_DEV", "IN_PROGRESS")
         if on_progress:
             on_progress(task)
@@ -168,6 +217,8 @@ INSTRUCTIONS FOR UNIFIED DIFF:
 """
         try:
             inv_patch_result: InvestigationAndPatchResult = self._call_gemini_structured(
+                task=task,
+                stage="STAGE_B_INVESTIGATION_AND_DEV",
                 system_instruction="You are a principal software engineer. Diagnose root cause and output a minimal, valid Unified Git Diff.",
                 prompt=investigation_prompt,
                 schema_cls=InvestigationAndPatchResult,
@@ -184,21 +235,23 @@ INSTRUCTIONS FOR UNIFIED DIFF:
             in_scope, scope_error = self.sandbox.validate_patch_scope(
                 inv_patch_result.unified_diff,
                 inv_patch_result.files_changed,
+                set(request.codebase),
             )
             if not in_scope:
                 raise ValueError(f"Generated patch failed path/scope validation: {scope_error}")
 
             task.investigation_patch = inv_patch_result
-            task.status = PipelineStatus.PATCHED
+            task.transition_to(PipelineStatus.PATCHED)
             self._log_event(task, "STAGE_B_INVESTIGATION_AND_DEV", "COMPLETED", {
                 "buggy_file": inv_patch_result.buggy_file,
                 "affected_function": inv_patch_result.affected_function,
                 "confidence_score": inv_patch_result.confidence_score,
+                "duration_ms": round((time.perf_counter() - investigation_started) * 1000, 2),
             })
             if on_progress:
                 on_progress(task)
         except Exception as e:
-            return self._handle_failure(task, "STAGE_B_INVESTIGATION_AND_DEV", e, on_progress)
+            return self._handle_failure(task, "STAGE_B_INVESTIGATION_AND_DEV", e, on_progress, round((time.perf_counter() - investigation_started) * 1000, 2))
 
         if should_cancel and should_cancel():
             return self._handle_cancellation(task, "STAGE_B_INVESTIGATION_AND_DEV", on_progress)
@@ -206,7 +259,9 @@ INSTRUCTIONS FOR UNIFIED DIFF:
         # -------------------------------------------------------------
         # DETERMINISTIC SANDBOX TEST RUNNER (Stage B -> Stage C Bridge)
         # -------------------------------------------------------------
+        task.transition_to(PipelineStatus.SANDBOX_RUNNING)
         task.current_stage = "SANDBOX_TEST_EXECUTION"
+        sandbox_started = time.perf_counter()
         self._log_event(task, "SANDBOX_TEST_EXECUTION", "IN_PROGRESS", {"isolation": self.sandbox.isolation_mode})
         if on_progress:
             on_progress(task)
@@ -215,21 +270,21 @@ INSTRUCTIONS FOR UNIFIED DIFF:
             sandbox_result: SandboxExecutionResult = self.sandbox.run_tests(
                 codebase=request.codebase,
                 unified_diff=task.investigation_patch.unified_diff,
-                test_command="pytest -p no:cacheprovider -v",
                 expected_files=task.investigation_patch.files_changed,
             )
             task.sandbox_result = sandbox_result
-            task.status = PipelineStatus.SANDBOX_TESTED
+            task.transition_to(PipelineStatus.SANDBOX_TESTED)
             self._log_event(task, "SANDBOX_TEST_EXECUTION", "COMPLETED", {
                 "exit_code": sandbox_result.exit_code,
                 "tests_passed": sandbox_result.tests_passed,
                 "applied_patch_cleanly": sandbox_result.applied_patch_cleanly,
                 "isolation_mode": sandbox_result.isolation_mode,
+                "duration_ms": round((time.perf_counter() - sandbox_started) * 1000, 2),
             })
             if on_progress:
                 on_progress(task)
         except Exception as e:
-            return self._handle_failure(task, "SANDBOX_TEST_EXECUTION", e, on_progress)
+            return self._handle_failure(task, "SANDBOX_TEST_EXECUTION", e, on_progress, round((time.perf_counter() - sandbox_started) * 1000, 2))
 
         if should_cancel and should_cancel():
             return self._handle_cancellation(task, "SANDBOX_TEST_EXECUTION", on_progress)
@@ -237,7 +292,9 @@ INSTRUCTIONS FOR UNIFIED DIFF:
         # -------------------------------------------------------------
         # STAGE C: REVIEWER AGENT
         # -------------------------------------------------------------
+        task.transition_to(PipelineStatus.REVIEWING)
         task.current_stage = "STAGE_C_REVIEW"
+        review_started = time.perf_counter()
         self._log_event(task, "STAGE_C_REVIEW", "IN_PROGRESS")
         if on_progress:
             on_progress(task)
@@ -272,6 +329,8 @@ Evaluate:
 """
         try:
             review_result: ReviewResult = self._call_gemini_structured(
+                task=task,
+                stage="STAGE_C_REVIEW",
                 system_instruction="You are a security auditor and release manager. Audit patch and test evidence objectively.",
                 prompt=reviewer_prompt,
                 schema_cls=ReviewResult,
@@ -280,13 +339,14 @@ Evaluate:
                 return self._handle_cancellation(task, "STAGE_C_REVIEW", on_progress)
             task.reviewer = review_result
             task.current_stage = "AWAITING_HUMAN_APPROVAL"
-            task.status = PipelineStatus.AWAITING_HUMAN_APPROVAL
-            self._log_event(task, "STAGE_C_REVIEW", "COMPLETED", review_result.model_dump())
-            if on_progress:
-                on_progress(task)
+            task.transition_to(PipelineStatus.AWAITING_HUMAN_APPROVAL)
+            self._log_event(task, "STAGE_C_REVIEW", "COMPLETED", {
+                **review_result.model_dump(),
+                "duration_ms": round((time.perf_counter() - review_started) * 1000, 2),
+            })
             return task
         except Exception as e:
-            return self._handle_failure(task, "STAGE_C_REVIEW", e, on_progress)
+            return self._handle_failure(task, "STAGE_C_REVIEW", e, on_progress, round((time.perf_counter() - review_started) * 1000, 2))
 
     def _handle_cancellation(
         self,
@@ -294,7 +354,7 @@ Evaluate:
         stage: str,
         on_progress: Optional[Callable[[PipelineTaskResponse], None]],
     ) -> PipelineTaskResponse:
-        task.status = PipelineStatus.CANCELLED
+        task.transition_to(PipelineStatus.CANCELLED)
         task.current_stage = "CANCELLED"
         self._log_event(task, stage, "CANCELLED")
         if on_progress:
@@ -307,19 +367,20 @@ Evaluate:
         stage: str,
         error: Exception,
         on_progress: Optional[Callable[[PipelineTaskResponse], None]],
+        duration_ms: Optional[float] = None,
     ) -> PipelineTaskResponse:
         """
         Gracefully handles pipeline failures or Gemini 429 quota exhaustion.
         Records stage error details without crashing the host process.
         """
         is_quota_error = False
-        error_msg = str(error)
+        error_msg = redact_sensitive_text(error)
         if isinstance(error, APIError):
             if error.code == 429 or "RESOURCE_EXHAUSTED" in error_msg:
                 is_quota_error = True
                 error_msg = "Gemini API Quota Exhausted (429 RESOURCE_EXHAUSTED). Pipeline stopped safely."
 
-        task.status = PipelineStatus.FAILED
+        task.transition_to(PipelineStatus.FAILED)
         task.current_stage = "FAILED"
         task.error = {
             "failed_stage": stage,
@@ -328,6 +389,8 @@ Evaluate:
             "is_quota_error": is_quota_error,
             "timestamp": self._now(),
         }
+        if duration_ms is not None:
+            task.error["duration_ms"] = duration_ms
         self._log_event(task, stage, "FAILED", task.error)
         if on_progress:
             on_progress(task)

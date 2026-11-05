@@ -1,0 +1,17 @@
+[Unit]
+Description=Create and verify a RELAY AI backup
+
+[Service]
+Type=oneshot
+User=relay-ai
+Group=relay-ai
+WorkingDirectory=/opt/relay-ai/relay-ai
+EnvironmentFile=/etc/relay-ai/relay-ai.env
+ExecStart=/opt/relay-ai/relay-ai/.venv/bin/python /opt/relay-ai/relay-ai/backup.py /secure/backups/relay-ai
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/relay-ai
+ReadWritePaths=/secure/backups/relay-ai

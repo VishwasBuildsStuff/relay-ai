@@ -1,0 +1,11 @@
+[Unit]
+Description=Check RELAY AI backup freshness daily
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=5m
+Persistent=true
+Unit=relay-ai-backup-age-check.service
+
+[Install]
+WantedBy=timers.target

@@ -19,7 +19,8 @@ from schemas import (
 def test_pipeline_status_enum():
     """Verify the explicit pipeline and human-action lifecycle states exist."""
     expected_states = {
-        "RECEIVED", "TRIAGED", "INVESTIGATED", "PATCHED",
+        "RECEIVED", "QUEUED", "RUNNING", "TRIAGING", "TRIAGED",
+        "INVESTIGATING", "INVESTIGATED", "PATCHED", "SANDBOX_RUNNING", "REVIEWING",
         "SANDBOX_TESTED", "REVIEWED", "AWAITING_HUMAN_APPROVAL", "APPROVED",
         "APPLIED", "COMMITTED", "REJECTED", "CANCELLED", "FAILED",
     }

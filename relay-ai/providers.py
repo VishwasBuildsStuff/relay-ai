@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import random
+import time
 from typing import Any, Dict, Protocol, Type
 
 from google import genai
+from google.genai.errors import APIError
 from google.genai import types
 
 
@@ -17,21 +20,40 @@ class GeminiStructuredProvider:
     def __init__(self, api_key: str, model_name: str):
         self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
+        self.max_attempts = 3
+        self.last_usage: dict[str, int] | None = None
 
     def generate(self, system_instruction: str, prompt: str, schema_cls: Type[Any]) -> Any:
+        self.last_usage = None
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             response_mime_type="application/json",
             response_schema=schema_cls,
             temperature=0.2,
         )
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=config,
-        )
+        for attempt in range(self.max_attempts):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                )
+                break
+            except APIError as error:
+                retryable = error.code in {408, 429, 500, 502, 503, 504}
+                if not retryable or attempt + 1 >= self.max_attempts:
+                    raise
+                delay = min(4.0, 0.5 * (2 ** attempt)) + random.uniform(0, 0.25)
+                time.sleep(delay)
         if not response.text:
             raise ValueError("Empty response received from Gemini model.")
+        usage = getattr(response, "usage_metadata", None)
+        if usage:
+            self.last_usage = {
+                "prompt_tokens": int(getattr(usage, "prompt_token_count", 0) or 0),
+                "candidate_tokens": int(getattr(usage, "candidates_token_count", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_token_count", 0) or 0),
+            }
         return schema_cls.model_validate_json(response.text)
 
 
