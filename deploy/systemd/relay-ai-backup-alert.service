@@ -1,0 +1,15 @@
+[Unit]
+Description=Send RELAY AI backup freshness failure alert
+
+[Service]
+Type=oneshot
+User=relay-ai
+Group=relay-ai
+WorkingDirectory=/opt/relay-ai/relay-ai
+EnvironmentFile=/etc/relay-ai/alerts.env
+ExecStart=/opt/relay-ai/relay-ai/.venv/bin/python /opt/relay-ai/relay-ai/backup_alert.py --service relay-ai-backup-age-check.service
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

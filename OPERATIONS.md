@@ -39,7 +39,7 @@ Backup creation validates the temporary archive before publishing its final file
 
 The verifier rejects unsafe archive paths and special entries, checks the manifest and archive limits, and runs SQLite integrity and foreign-key checks without extracting task workspaces.
 
-For monitoring, run `.venv/bin/python backup.py --check-latest /secure/backups/relay-ai --max-age-hours 26`. It emits JSON and returns a nonzero exit code if no archive exists or the newest archive is stale. The systemd templates include a daily freshness check; connect its failed unit to external alerting.
+For monitoring, run `.venv/bin/python backup.py --check-latest /secure/backups/relay-ai --max-age-hours 26`. It emits JSON and returns a nonzero exit code if no archive exists or the newest archive is stale. The systemd templates include a daily freshness check and an `OnFailure` webhook notifier. Configure `RELAY_BACKUP_ALERT_WEBHOOK_URL` in the protected `/etc/relay-ai/alerts.env` file, then trigger a controlled stale-backup drill and confirm receipt at the assigned alert destination.
 
 No automatic task expiry is enabled by default. Owners can permanently delete stopped tasks from the dashboard or `DELETE /tasks/{task_id}`. This removes the task source, events, action audit, queue record, usage rows, and task workspace. Active work must be cancelled and stopped first.
 

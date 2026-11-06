@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from path_utils import normalize_relative_path
+from path_utils import normalize_relative_path, normalize_snapshot_paths
 from redaction import redact_sensitive_text
 from schemas import IsolationMode, SandboxExecutionResult
 

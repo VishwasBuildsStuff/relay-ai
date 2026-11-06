@@ -1,5 +1,6 @@
 [Unit]
 Description=Check RELAY AI backup age
+OnFailure=relay-ai-backup-alert.service
 
 [Service]
 Type=oneshot

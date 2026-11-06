@@ -11,7 +11,7 @@ Last updated: 2026-11-06 (Asia/Kolkata)
 
 ## Current milestone: Local end-to-end MVP — finishing durable operations, hardening, and product QA
 
-## Follow-on milestone: Single-host production readiness (5/10 complete)
+## Follow-on milestone: Single-host production readiness (8/10 complete; 80%)
 
 | ID | Task | Status | Evidence / next step |
 |---|---|---|---|
@@ -20,10 +20,10 @@ Last updated: 2026-11-06 (Asia/Kolkata)
 | H3 | Define reverse-proxy deployment limits | DONE | Added Nginx TLS/proxy examples with body caps matching API routes, per-IP request/connection limits, timeouts, and overwritten forwarded headers. Uvicorn explicitly trusts only loopback. Multipart legacy `/tasks/submit` is now recognized by the backend body limiter. Host-specific Nginx syntax and real-IP configuration still require deployment-owner review. |
 | H4 | Enforce production authentication and CORS configuration | DONE | Production mode already requires authentication and explicit CORS; it now validates every CORS entry as a bare HTTPS origin without credentials, wildcard, whitespace, path, query, or fragment. Host-side end-to-end auth/CORS verification remains in H10. |
 | H5 | Harden patch boundaries against hostile diffs | DONE | Generated patches are capped at 1 MiB; scope validation rejects duplicate file sections, mode changes, renames/copies, binary patch sections, unsafe paths, undeclared paths, and non-snapshot targets. Request-level adversarial verification remains under H10. |
-| H6 | Verify sandbox isolation on the deployment host | TODO | Confirm network, filesystem, user, resource, and output limits against the installed Docker runtime and image. |
-| H7 | Verify worker concurrency and recovery | TODO | Exercise lease expiry, restart recovery, cancellation races, and bounded retry behavior. |
-| H8 | Rehearse configured Git target operations | TODO | Exercise stale-base rejection, changed-file-only apply/commit, and interrupted-operation recovery in a disposable repository. |
-| H9 | Complete backup restore and alerting drill | TODO | Restore an archive into isolation, inspect task history, and prove the backup-age failure reaches an assigned alert destination. |
+| H6 | Verify sandbox isolation on the deployment host | IN PROGRESS | Built the pinned image and passed an opt-in Docker isolation probe on the available Colima Docker 29.5.2 Linux runtime, checking network, read-only filesystem, non-root user, dropped capabilities, tmpfs flags/size, PID, and memory limits. Repeat on the actual deployment host before exposure. |
+| H7 | Verify worker concurrency and recovery | DONE | Added and passed durable-store drills for expired-lease recovery after reopening SQLite, cancellation winning a completion race, and retry exhaustion at the configured attempt bound. See `relay-ai/tests/test_recovery_drills.py`. |
+| H8 | Rehearse configured Git target operations | DONE | Added and passed disposable-repository drills for stale-base rejection, snapshot matching, changed-file-only commit, recovery after staging, and idempotent recognition after a commit acknowledgement loss. See `relay-ai/tests/test_repository_drills.py`. |
+| H9 | Complete backup restore and alerting drill | DONE | Created, verified, and restored an archive into isolation; task history, source snapshot, and applied workspace survived. A stale archive produced the failing monitoring result and the configured webhook POST reached a loopback drill receiver. Configure and rehearse the actual production destination under H10. See `relay-ai/tests/test_backup_drills.py` and `relay-ai/tests/test_backup_alert.py`. |
 | H10 | Complete release verification and ownership review | TODO | Run hostile archive/patch cases; verify auth/CORS and proxy behavior on the deployment host; perform keyboard/screen-reader and load review; assign named operators, data-use approval, and service objectives before exposure. |
 
 | ID | Task | Status | Evidence / next step |
@@ -431,3 +431,11 @@ No tests have been run. `npm install`, `npm run build`, `npm run lint` (TypeScri
 - Changed `python main.py` to bind to `127.0.0.1` by default, require an IP literal for `RELAY_HOST`, and refuse non-loopback binds unless shared-token or per-user authentication is configured. Disabled auto-reload in this entry point.
 - Documented the bind and authentication behavior in both setup guides and `.env.example`.
 - Verification: not run in this change; no tests were added or executed.
+
+### 2026-11-06 — Exercise local production recovery and isolation drills
+- Added worker recovery tests covering lease expiry across a store reopen, cancellation/finalization ordering, and the maximum retry count. Added disposable Git repository drills covering stale bases, changed-file-only commits, staged commit recovery, and commit replay after a lost acknowledgement. Added backup creation, isolated restore, data inspection, and stale archive detection drills.
+- Ran the full project test suite and found a missing `normalize_snapshot_paths` import in `sandbox.py`; fixed the import. Final suite: 25 passed, 2 opt-in/environment-specific checks skipped, with 1 Starlette deprecation warning. The loopback alert receiver drill passed separately (5 tests), and the Docker isolation drill passed separately (1 test).
+- Added an `OnFailure` systemd webhook notifier for backup freshness failures; HTTPS is required for configured destinations and plain HTTP is accepted only for loopback drill receivers. Verified a failure notice reached a temporary loopback receiver.
+- Built `relay-ai-sandbox:python3.11` from the pinned base and ran the opt-in Docker isolation probe against image `sha256:cb82b18dd09452ee061d5630516cad8f3a4ffb73a941564e57dfe00e89636f44` on Docker 29.5.2 / Ubuntu 24.04.4 under Colima; the probe passed. Added `tests/test_sandbox_isolation_drill.py` for repeatable runs. Deployment-host repetition remains required.
+- H7, H8, and H9 are complete for their implementation and local execution criteria. H6 remains in progress until repeated on the actual deployment host; H10 still requires production endpoint configuration, named ownership, and the combined release review. Production-readiness completion is 8/10 (80%).
+- `git diff --check` and Python `compileall` passed.
