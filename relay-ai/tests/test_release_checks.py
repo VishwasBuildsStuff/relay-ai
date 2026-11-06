@@ -1,9 +1,11 @@
 """Local production configuration, browser-origin, and authorization checks."""
 
 import json
+import io
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -98,3 +100,70 @@ def test_browser_origin_and_user_roles_are_enforced(monkeypatch):
     )
     assert allowed.headers.get("access-control-allow-origin") == "http://localhost:5173"
     assert "access-control-allow-origin" not in rejected.headers
+
+
+def _zip_bytes(entries):
+    """Build a small in-memory ZIP from (name, bytes-or-ZipInfo) entries."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, content in entries:
+            if isinstance(name, zipfile.ZipInfo):
+                archive.writestr(name, content)
+            else:
+                archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def test_archive_upload_rejects_hostile_entries_before_persisting(monkeypatch):
+    import main
+
+    persisted = []
+    monkeypatch.setattr(main.tasks_db, "create_task", lambda task, codebase: persisted.append((task, codebase)))
+    client = TestClient(app)
+
+    symlink = zipfile.ZipInfo("src/link.py")
+    symlink.create_system = 3
+    symlink.external_attr = (0o120777 << 16)
+    cases = [
+        ("traversal", _zip_bytes([("../escape.py", b"print('x')")])),
+        ("duplicate-casefold", _zip_bytes([("src/App.py", b"a"), ("src/app.py", b"b")])),
+        ("file-directory-collision", _zip_bytes([("src", b"file"), ("src/app.py", b"code")])),
+        ("symlink", _zip_bytes([(symlink, b"../../outside")])),
+        ("unreadable-source", _zip_bytes([("image.bin", b"\x00\xff")])),
+        ("invalid-zip", b"not a zip archive"),
+    ]
+
+    for label, payload in cases:
+        response = client.post(
+            "/api/v1/tasks/upload",
+            data={"bug_report": f"release check: {label}"},
+            files={"file": ("repo.zip", payload, "application/zip")},
+        )
+        assert response.status_code == 400, (label, response.text)
+        assert response.json().get("detail")
+
+    response = client.post(
+        "/api/v1/tasks/upload",
+        data={"bug_report": "safe archive"},
+        files={"file": ("repo.zip", _zip_bytes([("src/app.py", b"print('ok')")]), "application/zip")},
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "QUEUED"
+    assert len(persisted) == 1
+    assert persisted[0][1] == {"src/app.py": "print('ok')"}
+
+
+def test_archive_upload_rejects_entry_count_limit_before_persisting(monkeypatch):
+    import main
+
+    persisted = []
+    monkeypatch.setattr(main.tasks_db, "create_task", lambda task, codebase: persisted.append((task, codebase)))
+    oversized = _zip_bytes([(f"src/file_{index}.py", b"x") for index in range(main.MAX_ARCHIVE_FILES + 1)])
+    response = TestClient(app).post(
+        "/api/v1/tasks/upload",
+        data={"bug_report": "too many files"},
+        files={"file": ("repo.zip", oversized, "application/zip")},
+    )
+    assert response.status_code == 413
+    assert "500 entries" in response.json()["detail"]
+    assert persisted == []
