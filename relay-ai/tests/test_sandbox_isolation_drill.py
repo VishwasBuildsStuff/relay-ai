@@ -45,3 +45,13 @@ def test_runtime_policy():
     assert result.isolation_mode == "docker"
     assert result.exit_code == 0, result.stdout + result.stderr
     assert result.tests_passed
+
+
+def test_docker_runner_caps_captured_output():
+    noisy_test = '''def test_noisy_failure():
+    print("x" * 1_500_000)
+    assert False
+'''
+    result = SandboxRunner(timeout_seconds=20).run_tests({"test_noisy_output.py": noisy_test})
+    assert len(result.stdout.encode("utf-8")) <= 1_048_700
+    assert "output truncated at 1 MiB" in result.stdout

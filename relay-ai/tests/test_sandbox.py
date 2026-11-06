@@ -83,3 +83,48 @@ def test_sandbox_security_traversal_prevention(runner):
 
     with pytest.raises(SandboxSecurityError):
         runner.run_tests(malicious_codebase)
+
+
+@pytest.mark.parametrize("metadata", [
+    "new file mode 100644",
+    "deleted file mode 100644",
+    "old mode 100644",
+    "rename from file.py",
+    "copy from file.py",
+    "GIT binary patch",
+])
+def test_patch_scope_rejects_unsupported_metadata(runner, metadata):
+    patch = (
+        "diff --git a/file.py b/file.py\n"
+        f"{metadata}\n"
+        "--- a/file.py\n"
+        "+++ b/file.py\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+    valid, error = runner.validate_patch_scope(patch, ["file.py"], {"file.py"})
+    assert not valid
+    assert error
+
+
+@pytest.mark.parametrize("header", [
+    "diff --git a/../outside.py b/../outside.py",
+    "diff --git a/file.py b/other.py",
+    "diff --git a/.git/config b/.git/config",
+])
+def test_patch_scope_rejects_unsafe_or_mismatched_paths(runner, header):
+    patch = f"{header}\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-before\n+after\n"
+    valid, error = runner.validate_patch_scope(patch, ["file.py"], {"file.py"})
+    assert not valid
+    assert error
+
+
+def test_patch_scope_rejects_duplicate_sections(runner):
+    section = (
+        "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n"
+        "@@ -1 +1 @@\n-before\n+after\n"
+    )
+    valid, error = runner.validate_patch_scope(section + section, ["file.py"], {"file.py"})
+    assert not valid
+    assert "multiple diff sections" in error
