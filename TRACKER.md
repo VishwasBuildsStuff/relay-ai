@@ -1,6 +1,6 @@
 # RELAY AI Build Tracker
 
-Last updated: 2026-11-06 (Asia/Kolkata)
+Last updated: 2026-11-07 (Asia/Kolkata)
 
 ## Status key
 
@@ -52,6 +52,7 @@ Last updated: 2026-11-06 (Asia/Kolkata)
 | P3-03 | API integration and responsive/error states | DONE | Vite UI uses the `/api/v1` contract, polls in-flight tasks, handles loading/empty/error states, and provides responsive task/token/action controls. Cross-device visual and accessibility verification remains under P4-02. |
 | P4-01 | Authentication and per-task authorization | DONE | Local MVP supports unique per-user bearer tokens, owner-scoped task access, optional viewer/operator roles, and shared-token/local development modes. Token rotation, external identity provider integration, and broader production access-control policy remain under P4-02. |
 | P4-02 | Retention, observability, deployment, backup, runbooks | DONE | Local MVP includes owner-controlled deletion and dry-run-first retention, verified SQLite/workspace backups, non-destructive isolated restore tooling, backup-age CLI/systemd timers, service templates, restore/recovery runbook, threat model/SLOs, schema visibility, Prometheus metrics, local rate limits, and configured-repository audit protections. A deployment record template captures remaining host-specific ownership, socket policy, alert delivery, and restore-drill signoff; those operator-run steps are required before production exposure. |
+| P5-01 | Automate backend and frontend verification in CI | DONE | `.github/workflows/ci.yml` runs the backend pytest suite and frontend TypeScript/build checks for pushes to `main`, pull requests, and manual dispatch; jobs use read-only repository permissions, bounded runtimes, and cancel superseded runs. Root README documents the matching local commands. |
 
 ## Update log
 
@@ -446,3 +447,7 @@ Latest verification: `relay-ai/.venv/bin/python -m pytest relay-ai/tests -q` pas
 ### 2026-11-06 — Verify hostile ZIP uploads at the API boundary
 - Added request-level release checks for traversal paths, case-fold duplicate names, file/directory collisions, symlink entries, archives without readable text, malformed ZIP bytes, and the 500-entry limit. Invalid requests are verified to return 400/413 before task persistence; a normal source ZIP is verified to return 202 and persist the expected code map.
 - Verification: focused release checks passed (6 tests; one existing Starlette/httpx deprecation warning); the full suite passed (41 passed, 3 skipped, same warning). `git diff --check` passed.
+
+### 2026-11-07 — Add continuous integration checks
+- Added GitHub Actions CI for backend tests and frontend typecheck/build on `main` pushes, pull requests, and manual runs. Restricted workflow permissions to repository read access and added job timeouts plus cancellation for superseded runs. Documented the same local commands in the root README.
+- Local verification: backend suite passed (41 passed, 3 skipped); frontend TypeScript check and production build passed; workflow formatting and `git diff --check` reviewed. GitHub-hosted execution will provide the first remote runner confirmation after push.

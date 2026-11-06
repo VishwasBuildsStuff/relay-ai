@@ -15,6 +15,23 @@ Requirements: Node.js, Python 3.11+, Git, and (for isolated code execution) Dock
 5. Start the API from `relay-ai/`: `uvicorn main:app --host 127.0.0.1 --port 8000`. Running `python main.py` also binds to localhost by default; set `RELAY_HOST` to an IP address for another interface and configure `RELAY_API_TOKEN` or `RELAY_AUTH_USERS_JSON` before doing so.
 6. Start the dashboard from the repository root: `npm run dev`.
 
+## Development checks
+
+Run the backend suite from `relay-ai/` after activating its Python environment:
+
+```bash
+python -m pytest tests -q
+```
+
+Run the dashboard type check and production build from the repository root:
+
+```bash
+npm run lint
+npm run build
+```
+
+GitHub Actions runs these backend and frontend checks for pushes to `main`, pull requests, and manual dispatch. The default backend suite skips opt-in or environment-specific drills; follow the relevant instructions in `TRACKER.md` to run those separately.
+
 For deployment, set `RELAY_ENV=production`; the backend then requires authentication and an explicit non-wildcard CORS origin allow-list and rejects unsafe host-subprocess mode. The systemd service template enables production mode.
 
 The dashboard uses `VITE_API_URL` when set; otherwise it connects to `http://localhost:8000`. Backend options include `RELAY_DB_PATH`, `RELAY_APPLIED_ROOT`, `RELAY_CORS_ORIGINS`, `RELAY_API_TOKEN`, `RELAY_AUTH_USERS_JSON`, `RELAY_AUTH_ROLES_JSON`, `RELAY_SANDBOX_IMAGE`, and `RELAY_ALLOW_UNSAFE_SUBPROCESS`. `RELAY_API_TOKEN` provides one shared credential. For per-user ownership, configure `RELAY_AUTH_USERS_JSON` with username-to-unique-token mappings; it takes precedence over the shared token. Optionally assign `viewer` or `operator` roles with `RELAY_AUTH_ROLES_JSON`; when the role map is set, users omitted from it are viewers. Operators can submit, cancel, retry, approve, reject, apply, commit, and delete their own tasks. Viewers can inspect only their own task data. Enter the active token in the dashboard header; it stays in the browser tab session. Keep the subprocess option disabled when handling untrusted uploads: it runs uploaded code on the API host and is provided only for trusted local development.
