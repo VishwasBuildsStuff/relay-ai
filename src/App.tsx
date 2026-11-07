@@ -162,6 +162,7 @@ export default function App() {
   }
 
   return <div className="layout">
+    <a className="skip-link sr-only" href="#main-content">Skip to main content</a>
     <aside className="sidebar">
       <div className="brand"><span className="brand-icon">R</span><div><b>relay<span>.ai</span></b><small>ENGINEERING PIPELINE</small></div></div>
       <div className="side-caption">WORKSPACE</div><div className="nav-current"><Activity size={16}/> Pipeline</div>
@@ -171,7 +172,7 @@ export default function App() {
       <div className="task-pagination"><button disabled={taskPageOffset === 0} onClick={() => setTaskPageOffset(Math.max(0, taskPageOffset - 50))}>Newer</button><span>{totalTasks ? `${taskPageOffset + 1}–${Math.min(taskPageOffset + tasks.length, totalTasks)}` : '0 tasks'}</span><button disabled={taskPageOffset + 50 >= totalTasks} onClick={() => setTaskPageOffset(taskPageOffset + 50)}>Older</button></div>
       <div className="side-bottom"><i/> API <span>{API.replace(/^https?:\/\//, '')}</span></div>
     </aside>
-    <main className="main">
+    <main id="main-content" className="main" tabIndex={-1}>
       <header className="topbar"><span>RELAY AI <b>/</b> Autonomous pipeline</span><div className="top-actions"><small className="session-badge">{session.actor ? `${session.actor} · ${session.role}` : 'Connecting'}</small><input aria-label="Optional API token" type="password" value={apiToken} onChange={(e) => setApiToken(e.target.value)} placeholder="API token (optional)"/><button onClick={saveToken} aria-label="Save API token"><Save size={13}/><span>Save</span></button><button onClick={() => void refresh()} aria-label="Refresh tasks"><Activity size={14}/><span>Refresh</span></button></div></header>
       <div className="content">
         <div className="heading"><div><small>ENGINEERING AUTOMATION</small><h1>Issue remediation</h1><p>Turn a bug report into a reviewed patch with test evidence and a human decision.</p></div><span className="pipeline-label"><i/> 3-stage pipeline</span></div>

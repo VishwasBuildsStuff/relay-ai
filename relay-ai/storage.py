@@ -845,6 +845,40 @@ class SQLiteTaskStore(MutableMapping[str, PipelineTaskResponse]):
             rows = connection.execute("SELECT status, COUNT(*) AS count FROM pipeline_jobs GROUP BY status").fetchall()
         return {row["status"].lower(): int(row["count"]) for row in rows}
 
+    def pipeline_completion_sli(self, within_ms: int, window_days: int = 30) -> dict[str, int]:
+        """Summarize the rolling acceptance cohort against the review-or-failure time objective."""
+        window_start = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=window_days)
+        ).isoformat()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "WITH outcomes AS ("
+                "SELECT CASE "
+                "WHEN jobs.status='COMPLETED' AND tasks.status IN "
+                "('AWAITING_HUMAN_APPROVAL','REVIEWED','APPROVED','APPLIED','COMMITTED','REJECTED') THEN 'reviewed' "
+                "WHEN jobs.status='FAILED' OR tasks.status='FAILED' THEN 'failed' "
+                "WHEN jobs.status='CANCELLED' OR tasks.status='CANCELLED' THEN 'cancelled' "
+                "ELSE 'in_progress' END AS outcome, "
+                "(julianday(jobs.updated_at)-julianday(jobs.created_at))*86400000.0 AS elapsed_ms "
+                "FROM pipeline_jobs AS jobs JOIN tasks ON tasks.task_id=jobs.task_id "
+                "WHERE jobs.created_at>=?) "
+                "SELECT COUNT(*) AS accepted, "
+                "SUM(CASE WHEN outcome='reviewed' THEN 1 ELSE 0 END) AS reviewed, "
+                "SUM(CASE WHEN outcome='failed' THEN 1 ELSE 0 END) AS failed, "
+                "SUM(CASE WHEN outcome='cancelled' THEN 1 ELSE 0 END) AS cancelled, "
+                "SUM(CASE WHEN outcome='in_progress' THEN 1 ELSE 0 END) AS in_progress, "
+                "SUM(CASE WHEN outcome IN ('reviewed','failed') AND elapsed_ms<=? THEN 1 ELSE 0 END) AS within_slo, "
+                "SUM(CASE WHEN (outcome IN ('reviewed','failed') AND elapsed_ms>?) "
+                "OR (outcome='in_progress' AND elapsed_ms>?) THEN 1 ELSE 0 END) AS late "
+                "FROM outcomes",
+                (window_start, within_ms, within_ms, within_ms),
+            ).fetchone()
+        counts = {key: int(row[key] or 0) for key in (
+            "accepted", "reviewed", "failed", "cancelled", "in_progress", "within_slo", "late"
+        )}
+        counts["eligible"] = counts["within_slo"] + counts["late"]
+        return counts
+
     def schema_version(self) -> int:
         with self._lock, self._connect() as connection:
             row = connection.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()

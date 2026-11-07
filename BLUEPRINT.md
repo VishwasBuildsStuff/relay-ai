@@ -118,7 +118,7 @@ Secrets, raw credentials, and unnecessary source contents must not be copied int
 ### Phase 3 — Complete web product
 - Build responsive task submission, task list/detail, event timeline, diff viewer, evidence panels, and action flow.
 - Connect the UI to versioned API and surface loading, failure, empty, and retry states.
-- Gate: end-to-end user journey from submit through review and authorized repository action verified.
+- Gate: end-to-end API/worker journey from submission through staged evidence, human approval, patch application, and real Git commit is verified by [`relay-ai/tests/test_pipeline_e2e.py`](./relay-ai/tests/test_pipeline_e2e.py) with the deterministic fake provider and controlled sandbox result. The production sandbox runtime remains a separate Phase 2/H6 gate.
 
 ### Phase 4 — Production readiness
 - Add authentication/authorization, rate limiting, retention controls, metrics/tracing, deployment configuration, backups, and incident/runbook documentation.

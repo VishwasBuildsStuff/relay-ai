@@ -34,7 +34,7 @@ For a production Nginx example, install [`relay-ai.conf`](../deploy/nginx/relay-
 | `GET` | `/` | Service status and docs link |
 | `GET` | `/health` | Runtime and sandbox capability summary |
 | `GET` | `/ready` | Whether SQLite schema, worker, model, and sandbox dependencies are ready |
-| `GET` | `/metrics` | Prometheus-compatible queue, task, worker, and Gemini token metrics |
+| `GET` | `/metrics` | Prometheus-compatible queue, task, worker, pipeline completion SLI, and Gemini token metrics |
 | `GET` | `/api/v1/tasks?limit=50&offset=0&q=...&status=FAILED` | List persisted tasks with optional substring search, status filter, and `X-Total-Count` response header |
 | `DELETE` | `/api/v1/tasks/{task_id}` | Delete an owned, stopped task, including stored source, evidence, actions, queue record, and task workspace |
 | `POST` | `/api/v1/tasks` | Queue a JSON report and codebase snapshot; returns `202` |
@@ -62,7 +62,7 @@ Task data has no automatic expiry by default. An owner can permanently remove a 
 
 The local API applies fixed-window per-client limits of 10 task submissions and 60 actions per minute. The limiter stores only a BLAKE2 digest of the client address and cleans up expired buckets during use; multi-instance production deployments should use a shared rate-limit store.
 
-`/metrics` includes queue and task gauges, worker state, retained Gemini token and optional estimated USD cost gauges, persisted queue-wait and per-stage duration histograms, attempt and stage outcome counts, and sandbox execution counts labeled by isolation mode and pass/fail outcome.
+`/metrics` includes queue and task gauges, worker state, a pipeline completion SLI ratio with rolling 30-day accepted/reviewed/failed/cancelled/in-progress counts, retained Gemini token and optional estimated USD cost gauges, persisted queue-wait and per-stage duration histograms, attempt and stage outcome counts, and sandbox execution counts labeled by isolation mode and pass/fail outcome. Task deletion removes the job/task rows used by the completion SLI, so use an external durable metrics store for long-term SLO reporting.
 
 JSON and ZIP submissions are bounded at the ASGI request layer before FastAPI parsing (10 MiB JSON, 26 MiB multipart, and 1 MiB for other write bodies), then limited to 500 files, 2 MiB per file, and 1.5 MB of total UTF-8 source context for model calls. ZIP file transport is separately limited to 25 MiB compressed and expanded data, with bounded streaming extraction. Repository paths use portable NFC normalization and reject case-insensitive aliases, file/directory collisions, Windows-reserved names, and unsafe ZIP entry types. Configure upstream proxy limits as well, since the proxy/server may buffer data before application middleware receives it. The sandbox image is prepared ahead of time and test containers run without network access, with a read-only source mount, read-only root filesystem, dropped Linux capabilities, and resource limits. The API checks for the prebuilt image and never pulls it at task runtime. `RELAY_TEST_PROFILE` selects one of the fixed `pytest` or `unittest` argv profiles; arbitrary caller-supplied commands are not accepted. If Docker or the image is not available, test execution fails closed. `RELAY_ALLOW_UNSAFE_SUBPROCESS=true` enables a trusted-code-only local fallback; do not use it for untrusted archives.
 

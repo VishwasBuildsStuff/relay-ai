@@ -18,7 +18,8 @@ Review [THREAT_MODEL.md](./THREAT_MODEL.md) before exposing the service beyond l
 
 - `GET /health` reports runtime versions, sandbox capability, queue counts, active task count, schema version, and worker liveness.
 - `GET /ready` returns `200` only when the database schema, worker, provider configuration, and sandbox configuration are available. A missing Gemini key or sandbox image is expected to make the service unready.
-- `GET /metrics` exposes Prometheus-compatible queue, task, worker, queue-wait, retained Gemini token/cost gauges, stage duration/failure, job-attempt, and sandbox mode/outcome metrics. Gemini usage values decrease when owners delete tasks because usage is retained with task evidence. Protect the endpoint with the same API authentication as other routes.
+- API responses include a server-generated `X-Request-ID`; structured request logs record that ID with the matched route, method, status, and duration. Operator action audit details include the same ID so an approval, apply, commit, cancellation, or retry can be matched to its API log. Authorization headers, query strings, and request bodies are not included in this request log entry.
+- `GET /metrics` exposes Prometheus-compatible queue, task, worker, queue-wait, pipeline completion SLI, retained Gemini token/cost gauges, stage duration/failure, job-attempt, and sandbox mode/outcome metrics. The completion ratio uses mature jobs in the rolling 30-day acceptance cohort: cancellations and jobs less than 15 minutes old are excluded, while still-running jobs older than 15 minutes count as late. Owner deletion removes task/job observations; use an external durable metrics store for complete long-term SLO reporting. Gemini usage values also decrease when owners delete tasks because usage is retained with task evidence. Protect the endpoint with the same API authentication as other routes.
 
 ## Backup
 

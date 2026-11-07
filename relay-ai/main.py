@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import hashlib
+import logging
 import os
 import secrets
 import shutil
@@ -17,6 +18,7 @@ import stat
 import uuid
 import zipfile
 import datetime
+import time
 import json
 import ipaddress
 import re
@@ -47,6 +49,7 @@ from path_utils import normalize_relative_path, normalize_snapshot_paths
 from repository_targets import RepositoryTargetError, RepositoryTargetRegistry
 
 configure_logging()
+logger = logging.getLogger("relay.api")
 
 tasks_db = SQLiteTaskStore(os.environ.get("RELAY_DB_PATH", str(Path(__file__).with_name("relay_tasks.sqlite3"))))
 orchestrator = RelayOrchestrator()
@@ -56,6 +59,7 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ARCHIVE_FILES = 500
 MAX_ARCHIVE_FILE_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_EXPANDED_BYTES = 25 * 1024 * 1024
+PIPELINE_COMPLETION_SLO_MS = 15 * 60 * 1000
 MAX_JSON_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_MULTIPART_REQUEST_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024
 MAX_OTHER_REQUEST_BYTES = 1024 * 1024
@@ -245,6 +249,37 @@ async def optional_api_token(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def observe_api_requests(request: Request, call_next):
+    """Attach a server-generated request ID and log bounded, non-sensitive request metadata."""
+    request_id = uuid.uuid4().hex
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        logger.exception(
+            "api_request_failed",
+            extra={"request_id": request_id, "method": request.method, "route": route},
+        )
+        raise
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    duration_ms = round((time.perf_counter() - started) * 1000, 3)
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "api_request_completed",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "route": route,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+        },
+    )
+    return response
+
+
 # Add CORS after the token middleware so token failures still carry CORS headers.
 app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(
@@ -253,7 +288,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Total-Count"],
+    expose_headers=["X-Total-Count", "X-Request-ID"],
 )
 
 def _new_task(task_id: str, request: ReportRequest, owner_id: str) -> PipelineTaskResponse:
@@ -284,6 +319,29 @@ def _new_task(task_id: str, request: ReportRequest, owner_id: str) -> PipelineTa
         details={"files_count": len(request.codebase)},
     ))
     return task
+
+
+def _record_task_action(
+    task_id: str,
+    action: str,
+    request: Request,
+    outcome: str,
+    notes: str | None = None,
+    details: dict | None = None,
+    *,
+    idempotency_key: str | None = None,
+    request_hash: str | None = None,
+    response: PipelineTaskResponse | None = None,
+) -> None:
+    """Persist an action with its API request correlation ID in existing audit metadata."""
+    audit_details = dict(details or {})
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        audit_details["request_id"] = request_id
+    tasks_db.record_action(
+        task_id, action, request.state.actor, outcome, notes, audit_details,
+        idempotency_key=idempotency_key, request_hash=request_hash, response=response,
+    )
 
 
 @app.get("/")
@@ -355,6 +413,19 @@ def metrics():
         f'relay_pipeline_jobs{{status="{name}"}} {count}'
         for name, count in sorted(queue_counts.items())
     )
+    completion_sli = tasks_db.pipeline_completion_sli(PIPELINE_COMPLETION_SLO_MS)
+    lines.extend([
+        "# HELP relay_pipeline_completion_sli_jobs Counts among retained accepted jobs for the 15-minute review-or-failure objective; eligible excludes cancellations and jobs younger than 15 minutes.",
+        "# TYPE relay_pipeline_completion_sli_jobs gauge",
+    ])
+    for state in ("accepted", "reviewed", "failed", "cancelled", "in_progress", "eligible", "within_slo", "late"):
+        lines.append(f'relay_pipeline_completion_sli_jobs{{state="{state}"}} {completion_sli[state]}')
+    completion_ratio = completion_sli["within_slo"] / completion_sli["eligible"] if completion_sli["eligible"] else 0.0
+    lines.extend([
+        "# HELP relay_pipeline_completion_sli_ratio Fraction of mature retained jobs reaching review or classified failure within 15 minutes; cancellations excluded.",
+        "# TYPE relay_pipeline_completion_sli_ratio gauge",
+        f"relay_pipeline_completion_sli_ratio {completion_ratio:.6f}",
+    ])
     lines.extend([
         "# HELP relay_tasks Current persisted tasks by pipeline status.",
         "# TYPE relay_tasks gauge",
@@ -750,8 +821,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
             tasks_db[task_id] = task
         else:
             task = tasks_db[task_id]
-        tasks_db.record_action(
-            task_id, action, request.state.actor, job_status, action_req.notes,
+        _record_task_action(
+            task_id, action, request, job_status, action_req.notes,
             idempotency_key=idempotency_key, request_hash=request_hash, response=task,
         )
         return task
@@ -782,8 +853,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
         retried, retry_error = tasks_db.retry_job(task_id, reset_task)
         if not retried:
             raise HTTPException(status_code=409, detail=retry_error)
-        tasks_db.record_action(
-            task_id, action, request.state.actor, "QUEUED", action_req.notes,
+        _record_task_action(
+            task_id, action, request, "QUEUED", action_req.notes,
             idempotency_key=idempotency_key, request_hash=request_hash, response=reset_task,
         )
         return reset_task
@@ -827,8 +898,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
             raise HTTPException(status_code=400, detail="No proposed patch exists to apply.")
         if task.is_applied:
             if task.repository_id and task.repository_operation_state == "APPLIED":
-                tasks_db.record_action(
-                    task_id, action, request.state.actor, task.status.value, action_req.notes,
+                _record_task_action(
+                    task_id, action, request, task.status.value, action_req.notes,
                     {"repository_id": task.repository_id, "replayed_after_interruption": True},
                     idempotency_key=idempotency_key, request_hash=request_hash, response=task,
                 )
@@ -858,8 +929,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
                             "recovered_after_interruption": True,
                         }, actor=request.state.actor)
                         _persist_task_operation(task)
-                        tasks_db.record_action(
-                            task_id, action, request.state.actor, task.status.value, action_req.notes,
+                        _record_task_action(
+                            task_id, action, request, task.status.value, action_req.notes,
                             {"files": task.investigation_patch.files_changed, "recovered_after_interruption": True},
                             idempotency_key=idempotency_key, request_hash=request_hash, response=task,
                         )
@@ -920,8 +991,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
                         "target": "configured repository",
                     }, actor=request.state.actor)
                     _persist_task_operation(task)
-                    tasks_db.record_action(
-                        task_id, action, request.state.actor, task.status.value, action_req.notes,
+                    _record_task_action(
+                        task_id, action, request, task.status.value, action_req.notes,
                         {"files": task.investigation_patch.files_changed, "repository_id": task.repository_id},
                         idempotency_key=idempotency_key, request_hash=request_hash, response=task,
                     )
@@ -953,8 +1024,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
             )
         if task.is_committed:
             if task.repository_id and task.repository_operation_state == "COMMITTED":
-                tasks_db.record_action(
-                    task_id, action, request.state.actor, task.status.value, action_req.notes,
+                _record_task_action(
+                    task_id, action, request, task.status.value, action_req.notes,
                     {"repository_id": task.repository_id, "commit_hash": task.commit_hash, "replayed_after_interruption": True},
                     idempotency_key=idempotency_key, request_hash=request_hash, response=task,
                 )
@@ -994,8 +1065,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
                         "result_revision": task.repository_result_revision,
                     }, actor=request.state.actor)
                     _persist_task_operation(task)
-                    tasks_db.record_action(
-                        task_id, action, request.state.actor, task.status.value, action_req.notes,
+                    _record_task_action(
+                        task_id, action, request, task.status.value, action_req.notes,
                         {
                             "commit_hash": task.commit_hash, "commit_message": task.commit_message,
                             "repository_id": task.repository_id, "base_revision": task.repository_base_revision,
@@ -1043,8 +1114,8 @@ def handle_task_action(task_id: str, action_req: TaskActionRequest, request: Req
             details["repository_id"] = task.repository_id
             details["base_revision"] = task.repository_base_revision
             details["result_revision"] = task.repository_result_revision
-    tasks_db.record_action(
-        task_id, action, request.state.actor, outcome, action_req.notes, details,
+    _record_task_action(
+        task_id, action, request, outcome, action_req.notes, details,
         idempotency_key=idempotency_key, request_hash=request_hash, response=task,
     )
     return task

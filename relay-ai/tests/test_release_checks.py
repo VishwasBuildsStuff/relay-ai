@@ -105,7 +105,7 @@ def test_browser_origin_and_user_roles_are_enforced(monkeypatch):
 def _zip_bytes(entries):
     """Build a small in-memory ZIP from (name, bytes-or-ZipInfo) entries."""
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in entries:
             if isinstance(name, zipfile.ZipInfo):
                 archive.writestr(name, content)
@@ -119,6 +119,7 @@ def test_archive_upload_rejects_hostile_entries_before_persisting(monkeypatch):
 
     persisted = []
     monkeypatch.setattr(main.tasks_db, "create_task", lambda task, codebase: persisted.append((task, codebase)))
+    monkeypatch.setattr(main.tasks_db, "consume_rate_limit", lambda *args, **kwargs: (True, 0))
     client = TestClient(app)
 
     symlink = zipfile.ZipInfo("src/link.py")
@@ -158,6 +159,7 @@ def test_archive_upload_rejects_entry_count_limit_before_persisting(monkeypatch)
 
     persisted = []
     monkeypatch.setattr(main.tasks_db, "create_task", lambda task, codebase: persisted.append((task, codebase)))
+    monkeypatch.setattr(main.tasks_db, "consume_rate_limit", lambda *args, **kwargs: (True, 0))
     oversized = _zip_bytes([(f"src/file_{index}.py", b"x") for index in range(main.MAX_ARCHIVE_FILES + 1)])
     response = TestClient(app).post(
         "/api/v1/tasks/upload",
@@ -166,4 +168,44 @@ def test_archive_upload_rejects_entry_count_limit_before_persisting(monkeypatch)
     )
     assert response.status_code == 413
     assert "500 entries" in response.json()["detail"]
+    assert persisted == []
+
+
+def test_archive_upload_enforces_upload_member_and_expanded_size_limits(monkeypatch):
+    import main
+
+    persisted = []
+    monkeypatch.setattr(main.tasks_db, "create_task", lambda task, codebase: persisted.append((task, codebase)))
+    monkeypatch.setattr(main.tasks_db, "consume_rate_limit", lambda *args, **kwargs: (True, 0))
+    client = TestClient(app)
+
+    oversized_upload = b"x" * (main.MAX_UPLOAD_BYTES + 1)
+    upload_response = client.post(
+        "/api/v1/tasks/upload",
+        data={"bug_report": "oversized upload"},
+        files={"file": ("repo.zip", oversized_upload, "application/zip")},
+    )
+    assert upload_response.status_code == 413
+    assert "25 MiB" in upload_response.json()["detail"]
+
+    oversized_member = _zip_bytes([("src/large.py", b"x" * (main.MAX_ARCHIVE_FILE_BYTES + 1))])
+    member_response = client.post(
+        "/api/v1/tasks/upload",
+        data={"bug_report": "oversized member"},
+        files={"file": ("repo.zip", oversized_member, "application/zip")},
+    )
+    assert member_response.status_code == 413
+    assert "2 MiB" in member_response.json()["detail"]
+
+    aggregate_archive = _zip_bytes([
+        (f"src/file_{index}.py", b"x" * main.MAX_ARCHIVE_FILE_BYTES)
+        for index in range(main.MAX_ARCHIVE_EXPANDED_BYTES // main.MAX_ARCHIVE_FILE_BYTES + 1)
+    ])
+    expanded_response = client.post(
+        "/api/v1/tasks/upload",
+        data={"bug_report": "oversized expanded archive"},
+        files={"file": ("repo.zip", aggregate_archive, "application/zip")},
+    )
+    assert expanded_response.status_code == 413
+    assert "expands beyond" in expanded_response.json()["detail"]
     assert persisted == []

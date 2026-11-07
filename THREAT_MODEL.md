@@ -53,7 +53,7 @@ These are initial targets for an operator-managed single-host pilot, not measure
 |---|---|---|
 | API availability | At least 99.0% successful health/readiness checks per calendar month, excluding announced maintenance | Probe `/health` and `/ready` separately; readiness intentionally fails when Gemini or the sandbox image is unavailable. No external probe is configured by this repository. |
 | Queue wait | 95% of worker attempts claimed within 30 seconds while the worker is healthy | `relay_job_queue_wait_ms` histogram; traffic and single-worker saturation affect the result. |
-| Pipeline completion | 90% of accepted jobs reach review or a classified terminal failure within 15 minutes | Derive from task/job timestamps and failure outcomes; depends on provider latency/quota and repository size. This end-to-end SLI is not yet emitted as a single metric. |
+| Pipeline completion | 90% of mature jobs reach review or a classified terminal failure within 15 minutes | `/metrics` exposes `relay_pipeline_completion_sli_ratio` and rolling 30-day cohort counts from task/job timestamps. The ratio excludes cancellations and jobs still within their first 15 minutes; overdue in-progress jobs count as late. It depends on provider latency/quota and repository size; owner-deleted tasks disappear from the measured cohort, so long-term SLO reporting needs an external durable metrics store. |
 | Recovery point | No more than 24 hours of task data loss | Requires an operator-scheduled daily backup; no scheduler is included. |
 | Recovery time | Restore core service and verify task/event access within 4 hours | Manual runbook target; restore drill not yet evidenced. |
 

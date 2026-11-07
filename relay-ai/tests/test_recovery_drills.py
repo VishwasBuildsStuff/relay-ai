@@ -2,9 +2,11 @@
 
 import datetime
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
-from schemas import PipelineStatus, PipelineTaskResponse
+from schemas import EvidenceEvent, PipelineStatus, PipelineTaskResponse
 from storage import SQLiteTaskStore
+from worker import PipelineWorker
 
 
 def _queued_task(task_id: str) -> PipelineTaskResponse:
@@ -88,3 +90,67 @@ def test_manual_retry_is_bounded_by_attempt_limit(tmp_path):
     retry_allowed, message = store.retry_job("retry-me", _queued_task("retry-me"))
     assert not retry_allowed
     assert "maximum retry count" in message
+
+
+def test_concurrent_worker_claims_are_unique_and_persist_ordered_events(tmp_path):
+    database = str(tmp_path / "concurrent.sqlite3")
+    coordinator = SQLiteTaskStore(database)
+    task_ids = [f"concurrent-{index}" for index in range(8)]
+    stores = [SQLiteTaskStore(database) for _ in task_ids]
+
+    for task_id in task_ids:
+        task = _queued_task(task_id)
+        task.evidence_timeline.append(EvidenceEvent(
+            timestamp=task.created_at,
+            stage="INGESTION",
+            status="QUEUED",
+            actor="local-operator",
+            correlation_id=task_id,
+            details={"files_count": 1},
+        ))
+        coordinator.create_task(task, {"main.py": "print('ok')"}, max_attempts=1)
+
+    with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+        claims = list(executor.map(lambda store: store.claim_job(), stores))
+
+    claimed_ids = [claim["task_id"] for claim in claims if claim is not None]
+    assert len(claimed_ids) == len(task_ids)
+    assert len(set(claimed_ids)) == len(task_ids)
+    assert set(claimed_ids) == set(task_ids)
+    assert all(claim["attempt"] == 1 for claim in claims if claim is not None)
+
+    for task_id in task_ids:
+        events = coordinator.get_events(task_id, limit=10)
+        assert [event.stage for event in events] == ["WORKER_CLAIM", "INGESTION"]
+        assert coordinator.count_events(task_id) == 2
+
+    assert all(store.claim_job() is None for store in stores)
+
+
+def test_worker_failure_persists_terminal_state_and_redacted_diagnostic(tmp_path, monkeypatch):
+    secret = "provider-key-123456789"
+    monkeypatch.setenv("RELAY_API_TOKEN", secret)
+    store = SQLiteTaskStore(tmp_path / "worker-failure.sqlite3")
+    store.create_task(_queued_task("worker-failure"), {"main.py": "print('ok')"})
+    job = store.claim_job()
+    assert job is not None
+
+    class FailingOrchestrator:
+        async def run(self, *_args, **_kwargs):
+            raise RuntimeError(f"provider request failed api_key={secret}")
+
+        @staticmethod
+        def _now():
+            return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    PipelineWorker(store, FailingOrchestrator())._process(job)
+
+    failed_task = store["worker-failure"]
+    failed_job = store.get_job("worker-failure")
+    assert failed_task.status == PipelineStatus.FAILED
+    assert failed_task.error["failed_stage"] == "WORKER"
+    assert secret not in failed_task.error["message"]
+    assert "[REDACTED]" in failed_task.error["message"]
+    assert failed_job["status"] == "FAILED"
+    assert secret not in failed_job["error"]
+    assert store.get_events("worker-failure", limit=1)[0].stage == "WORKER"

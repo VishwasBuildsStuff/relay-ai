@@ -19,7 +19,9 @@ class JsonLogFormatter(logging.Formatter):
             "logger": record.name,
             "message": redact_sensitive_text(record.getMessage()),
         }
-        for key in ("task_id", "stage", "attempt"):
+        for key in (
+            "task_id", "stage", "attempt", "request_id", "method", "route", "status_code", "duration_ms"
+        ):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
