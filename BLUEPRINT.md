@@ -13,6 +13,10 @@ RELAY AI accepts an engineering issue and a repository snapshot, produces a trac
 5. Long-running work is asynchronous from the user's perspective: submit, receive task ID, watch progress, inspect result, decide.
 6. Keep provider, persistence, sandbox, and API boundaries replaceable.
 
+## Dashboard visual direction
+
+The dashboard uses an Apple-inspired visual language while keeping RELAY AI's own identity: a bright neutral canvas, native system typography, translucent navigation surfaces, layered panels, soft depth, and blue primary actions. Follow the operating-system appearance by default, allow a persistent System/Light/Dark preference, and keep browser chrome aligned with the selected mode. Status and evidence colors remain semantic and readable; controls use clear focus rings and large touch targets. Use motion sparingly to explain state and hierarchy, honor `prefers-reduced-motion`, and avoid external font or image dependencies for core interface rendering. Keep the visual system responsive from narrow phones through wide desktop workspaces.
+
 ## Target architecture
 
 ```mermaid

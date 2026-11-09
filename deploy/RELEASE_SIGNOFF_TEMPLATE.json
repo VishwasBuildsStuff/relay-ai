@@ -1,0 +1,16 @@
+{
+  "target_host": "",
+  "deployment_revision": "",
+  "primary_owner": "",
+  "backup_owner": "",
+  "security_contact": "",
+  "nginx_config_test": "",
+  "auth_cors_proxy_test": "",
+  "sandbox_isolation": "",
+  "gemini_data_approval": "",
+  "backup_alert_delivery": "",
+  "restore_drill": "",
+  "accessibility_review": "",
+  "load_review": "",
+  "slo_owner": ""
+}

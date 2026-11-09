@@ -15,9 +15,13 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend tests
+    name: Backend tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -25,7 +29,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: relay-ai/requirements.txt
 
@@ -36,6 +40,10 @@ jobs:
       - name: Run backend tests
         working-directory: relay-ai
         run: python -m pytest tests -q
+
+      - name: Compile backend modules
+        working-directory: relay-ai
+        run: python -m compileall -q .
 
   frontend:
     name: Frontend typecheck and build
@@ -59,3 +67,7 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      - name: Report deployment prerequisites
+        run: |
+          python relay-ai/preflight.py --json | tee "$RUNNER_TEMP/relay-preflight.json" | python -c 'import json, sys; checks=json.load(sys.stdin); expected={"production-mode", "authentication", "cors", "sandbox-image", "host-subprocess", "frontend-build", "delivery-headers", "nginx-template", "host-and-owner-signoff"}; actual={check["id"] for check in checks}; assert expected <= actual, f"Missing preflight checks: {expected - actual}"; assert all(check["status"] in {"PASS", "FAIL", "ACTION REQUIRED", "MANUAL"} for check in checks), "Unknown preflight status"; print(f"Validated {len(checks)} deployment preflight checks")'

@@ -43,13 +43,14 @@ from schemas import (
 )
 from storage import SQLiteTaskStore
 from worker import PipelineWorker
-from observability import configure_logging
+from observability import RequestMetrics, configure_logging
 from redaction import redact_sensitive_text
 from path_utils import normalize_relative_path, normalize_snapshot_paths
 from repository_targets import RepositoryTargetError, RepositoryTargetRegistry
 
 configure_logging()
 logger = logging.getLogger("relay.api")
+api_request_metrics = RequestMetrics()
 
 tasks_db = SQLiteTaskStore(os.environ.get("RELAY_DB_PATH", str(Path(__file__).with_name("relay_tasks.sqlite3"))))
 orchestrator = RelayOrchestrator()
@@ -259,13 +260,22 @@ async def observe_api_requests(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         route = getattr(request.scope.get("route"), "path", "unmatched")
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
         logger.exception(
             "api_request_failed",
-            extra={"request_id": request_id, "method": request.method, "route": route},
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "route": route,
+                "status_code": 500,
+                "duration_ms": duration_ms,
+            },
         )
+        api_request_metrics.observe(route, request.method, 500, duration_ms)
         raise
     route = getattr(request.scope.get("route"), "path", "unmatched")
     duration_ms = round((time.perf_counter() - started) * 1000, 3)
+    api_request_metrics.observe(route, request.method, response.status_code, duration_ms)
     response.headers["X-Request-ID"] = request_id
     logger.info(
         "api_request_completed",
@@ -278,6 +288,17 @@ async def observe_api_requests(request: Request, call_next):
         },
     )
     return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_api_error(request: Request, _error: Exception):
+    """Return a safe 500 response that preserves the request correlation ID."""
+    request_id = getattr(request.state, "request_id", None) or uuid.uuid4().hex
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error.", "request_id": request_id},
+        headers={"X-Request-ID": request_id},
+    )
 
 
 # Add CORS after the token middleware so token failures still carry CORS headers.
@@ -400,15 +421,44 @@ def health_check():
 @app.get("/metrics", include_in_schema=False)
 def metrics():
     """Expose a small Prometheus-compatible operational snapshot."""
+    def escape_label(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
     queue_counts = tasks_db.job_counts()
     task_counts: Dict[str, int] = {}
     for task_id in tasks_db:
         status_name = tasks_db[task_id].status.value.lower()
         task_counts[status_name] = task_counts.get(status_name, 0) + 1
     lines = [
+        "# HELP relay_api_requests_total API requests observed by this process, grouped by route, method, and status class.",
+        "# TYPE relay_api_requests_total counter",
+    ]
+    request_observations, request_counts = api_request_metrics.snapshot()
+    lines.extend(
+        f'relay_api_requests_total{{route="{escape_label(route)}",method="{method}",status_class="{status_class}"}} {count}'
+        for (route, method, status_class), count in sorted(request_counts.items())
+    )
+    lines.extend([
+        "# HELP relay_api_request_duration_ms Request duration in milliseconds, summarized by route and method for this process lifetime.",
+        "# TYPE relay_api_request_duration_ms histogram",
+    ])
+    request_bounds = (*RequestMetrics.BUCKETS_MS, None)
+    for (route, method), observation in sorted(request_observations.items()):
+        escaped_route = escape_label(route)
+        for index, bound in enumerate(request_bounds):
+            label = "+Inf" if bound is None else str(bound)
+            count = observation["count"] if bound is None else observation["buckets"][index]
+            lines.append(
+                f'relay_api_request_duration_ms_bucket{{route="{escaped_route}",method="{method}",le="{label}"}} {count}'
+            )
+        lines.extend([
+            f'relay_api_request_duration_ms_sum{{route="{escaped_route}",method="{method}"}} {observation["duration_sum"]:.3f}',
+            f'relay_api_request_duration_ms_count{{route="{escaped_route}",method="{method}"}} {observation["count"]}',
+        ])
+    lines.extend([
         "# HELP relay_pipeline_jobs Current durable jobs by queue status.",
         "# TYPE relay_pipeline_jobs gauge",
-    ]
+    ])
     lines.extend(
         f'relay_pipeline_jobs{{status="{name}"}} {count}'
         for name, count in sorted(queue_counts.items())

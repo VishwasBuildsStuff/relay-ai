@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Activity, ArrowRight, Check, CircleAlert, FileArchive, LoaderCircle, Save, ShieldCheck, Trash2, UploadCloud, X } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Activity, ArrowRight, Check, CircleAlert, FileArchive, LoaderCircle, Monitor, Moon, Save, ShieldCheck, Sun, Trash2, UploadCloud, X } from 'lucide-react';
 
 type TimelineEvent = { timestamp: string; stage: string; status: string; actor?: string; correlation_id?: string | null; details: Record<string, unknown> };
 type Task = {
@@ -18,7 +18,25 @@ type Scenario = { id: string; name: string; description: string; bug_report: str
 type Session = { actor: string; role: 'viewer' | 'operator' };
 type RepositoryTarget = { repository_id: string; branch: string; revision: string; clean: boolean };
 type ActionAudit = { action_id: number; actor: string; action: string; outcome: string; notes?: string | null; details: Record<string, unknown>; created_at: string };
-const API = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+type Readiness = { status: 'checking' | 'ready' | 'degraded' | 'offline' | 'auth'; detail?: string };
+type ThemePreference = 'system' | 'light' | 'dark';
+type ApiErrorPayload = { detail?: unknown; request_id?: unknown };
+class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly payload: ApiErrorPayload) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+const READINESS_LABELS: Record<Readiness['status'], string> = {
+  checking: 'CHECKING',
+  ready: 'READY',
+  degraded: 'DEGRADED',
+  offline: 'OFFLINE',
+  auth: 'AUTH REQUIRED',
+};
+const THEME_LABELS: Record<ThemePreference, string> = { system: 'System', light: 'Light', dark: 'Dark' };
+const NEXT_THEME: Record<ThemePreference, ThemePreference> = { system: 'light', light: 'dark', dark: 'system' };
+const API = (import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:8000')).replace(/\/$/, '');
 
 async function api<T>(path: string, init?: RequestInit, onResponse?: (response: Response) => void): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -26,8 +44,10 @@ async function api<T>(path: string, init?: RequestInit, onResponse?: (response: 
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(`${API}${path}`, { ...init, headers });
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `API request failed (${response.status})`);
+    const body = await response.json().catch(() => ({})) as ApiErrorPayload;
+    const detail = typeof body.detail === 'string' ? body.detail : `API request failed (${response.status})`;
+    const requestId = response.headers.get('X-Request-ID') || (typeof body.request_id === 'string' ? body.request_id : '');
+    throw new ApiError(requestId ? `${detail} (Request ID: ${requestId})` : detail, response.status, body);
   }
   onResponse?.(response);
   if (response.status === 204) return undefined as T;
@@ -35,6 +55,11 @@ async function api<T>(path: string, init?: RequestInit, onResponse?: (response: 
 }
 
 export default function App() {
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => {
+    const saved = window.localStorage.getItem('relay-theme');
+    return saved === 'light' || saved === 'dark' ? saved : 'system';
+  });
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [task, setTask] = useState<Task | null>(null);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
@@ -48,6 +73,10 @@ export default function App() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [apiToken, setApiToken] = useState(() => window.sessionStorage.getItem('relay-api-token') || '');
+  const [tokenRevision, setTokenRevision] = useState(0);
+  const [readiness, setReadiness] = useState<Readiness>({ status: 'checking' });
+  const [readinessChecking, setReadinessChecking] = useState(false);
+  const readinessCheckInFlight = useRef(false);
   const [taskSearch, setTaskSearch] = useState('');
   const [taskStatus, setTaskStatus] = useState('');
   const [taskPageOffset, setTaskPageOffset] = useState(0);
@@ -61,6 +90,25 @@ export default function App() {
   const [eventPageOffset, setEventPageOffset] = useState(0);
   const [reviewNotes, setReviewNotes] = useState('');
   const [commitMessage, setCommitMessage] = useState('');
+
+  const resolvedTheme = themePreference === 'system' ? (systemDark ? 'dark' : 'light') : themePreference;
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = (event: MediaQueryListEvent) => setSystemDark(event.matches);
+    setSystemDark(preference.matches);
+    preference.addEventListener('change', update);
+    return () => preference.removeEventListener('change', update);
+  }, []);
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolvedTheme === 'dark' ? '#0b0b0d' : '#f5f5f7');
+    if (themePreference === 'system') window.localStorage.removeItem('relay-theme');
+    else window.localStorage.setItem('relay-theme', themePreference);
+  }, [resolvedTheme, themePreference]);
+
+  function cycleTheme() {
+    setThemePreference((current) => current === 'system' ? 'light' : current === 'light' ? 'dark' : 'system');
+  }
 
   const refresh = useCallback(async () => {
     try {
@@ -85,6 +133,41 @@ export default function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not reach the API.'); }
   }, [taskSearch, taskStatus, taskPageOffset, task?.task_id, eventPageOffset, actionPageOffset]);
   useEffect(() => { void refresh(); }, [refresh]);
+  const checkReadiness = useCallback(async () => {
+    if (readinessCheckInFlight.current) return;
+    readinessCheckInFlight.current = true;
+    setReadinessChecking(true);
+    try {
+      await api<{ status: string }>('/ready', { signal: AbortSignal.timeout(8_000) });
+      setReadiness({ status: 'ready' });
+    } catch (reason) {
+      const detail = reason instanceof Error ? reason.message : '';
+      if (reason instanceof ApiError && reason.status === 503) {
+        const payloadDetail = reason.payload.detail;
+        const missing = payloadDetail && typeof payloadDetail === 'object'
+          ? (payloadDetail as { missing?: unknown }).missing
+          : undefined;
+        const issues = Array.isArray(missing) ? missing.filter((item): item is string => typeof item === 'string') : [];
+        setReadiness({ status: 'degraded', detail: issues.join(' · ') || 'A required pipeline dependency is unavailable.' });
+      } else if (reason instanceof ApiError && reason.status === 401) {
+        setReadiness({ status: 'auth', detail: 'Save a valid API token to check service readiness.' });
+      } else if (reason instanceof DOMException && reason.name === 'TimeoutError') {
+        setReadiness({ status: 'offline', detail: 'The readiness check timed out. The API may be unavailable or overloaded.' });
+      } else if (reason instanceof TypeError || /failed to fetch|network|fetch/i.test(detail)) {
+        setReadiness({ status: 'offline', detail: 'The dashboard cannot reach the API.' });
+      } else {
+        setReadiness({ status: 'degraded', detail: 'The readiness check did not complete successfully.' });
+      }
+    } finally {
+      readinessCheckInFlight.current = false;
+      setReadinessChecking(false);
+    }
+  }, []);
+  useEffect(() => {
+    void checkReadiness();
+    const timer = window.setInterval(() => { void checkReadiness(); }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [checkReadiness, tokenRevision]);
   useEffect(() => {
     if (!session.actor) return;
     let active = true;
@@ -146,7 +229,7 @@ export default function App() {
   }
 
   function loadScenario(item: Scenario) { setReport(item.bug_report); setSnapshot(JSON.stringify(item.codebase, null, 2)); setArchive(null); setInputMode('map'); setRepositoryId(''); setMessage(`${item.name} loaded.`); }
-  function saveToken() { if (apiToken.trim()) window.sessionStorage.setItem('relay-api-token', apiToken.trim()); else window.sessionStorage.removeItem('relay-api-token'); void refresh(); }
+  function saveToken() { if (apiToken.trim()) window.sessionStorage.setItem('relay-api-token', apiToken.trim()); else window.sessionStorage.removeItem('relay-api-token'); setTokenRevision((revision) => revision + 1); void refresh(); }
   async function downloadPatch() {
     if (!task?.investigation_patch) return;
     try {
@@ -170,12 +253,13 @@ export default function App() {
       <div className="task-filters"><input aria-label="Search tasks" value={taskSearch} onChange={(e) => { setTaskSearch(e.target.value); setTaskPageOffset(0); }} placeholder="Search tasks"/><select aria-label="Filter tasks by status" value={taskStatus} onChange={(e) => { setTaskStatus(e.target.value); setTaskPageOffset(0); }}><option value="">All statuses</option>{['RECEIVED','QUEUED','RUNNING','TRIAGING','TRIAGED','INVESTIGATING','INVESTIGATED','PATCHED','SANDBOX_RUNNING','SANDBOX_TESTED','REVIEWING','REVIEWED','AWAITING_HUMAN_APPROVAL','APPROVED','APPLIED','COMMITTED','REJECTED','CANCELLED','FAILED'].map((s) => <option key={s} value={s}>{s.replaceAll('_',' ')}</option>)}</select></div>
       <div className="task-list">{tasks.map((item) => <div key={item.task_id} className="task-row"><button className={`task-link ${task?.task_id === item.task_id ? 'selected' : ''}`} onClick={() => { setTask(item); setActions([]); setTotalActions(0); setActionPageOffset(0); setEvents([]); setTotalEvents(0); setEventPageOffset(0); setReviewNotes(''); setCommitMessage(''); }}><i className={`dot ${item.status.toLowerCase()}`}/><span><b>{item.triage?.title || item.bug_report}</b><small>{item.status.replaceAll('_', ' ')}</small></span></button>{session.role === 'operator' && <button className="task-delete" aria-label={`Delete task ${item.triage?.title || item.task_id}`} title="Delete task and stored source" disabled={busy} onClick={() => void deleteTask(item)}><Trash2 size={13}/></button>}</div>)}{!tasks.length && <p className="side-empty">Submitted tasks will appear here.</p>}</div>
       <div className="task-pagination"><button disabled={taskPageOffset === 0} onClick={() => setTaskPageOffset(Math.max(0, taskPageOffset - 50))}>Newer</button><span>{totalTasks ? `${taskPageOffset + 1}–${Math.min(taskPageOffset + tasks.length, totalTasks)}` : '0 tasks'}</span><button disabled={taskPageOffset + 50 >= totalTasks} onClick={() => setTaskPageOffset(taskPageOffset + 50)}>Older</button></div>
-      <div className="side-bottom"><i/> API <span>{API.replace(/^https?:\/\//, '')}</span></div>
+      <div className="side-bottom"><i/> API <span>{API ? API.replace(/^https?:\/\//, '') : window.location.host}</span></div>
     </aside>
     <main id="main-content" className="main" tabIndex={-1}>
-      <header className="topbar"><span>RELAY AI <b>/</b> Autonomous pipeline</span><div className="top-actions"><small className="session-badge">{session.actor ? `${session.actor} · ${session.role}` : 'Connecting'}</small><input aria-label="Optional API token" type="password" value={apiToken} onChange={(e) => setApiToken(e.target.value)} placeholder="API token (optional)"/><button onClick={saveToken} aria-label="Save API token"><Save size={13}/><span>Save</span></button><button onClick={() => void refresh()} aria-label="Refresh tasks"><Activity size={14}/><span>Refresh</span></button></div></header>
+      <header className="topbar"><span>RELAY AI <b>/</b> Autonomous pipeline</span><div className="top-actions"><small className={`readiness-badge ${readiness.status}`} aria-live="polite" aria-label={`Pipeline service: ${READINESS_LABELS[readiness.status]}${readiness.detail ? `. ${readiness.detail}` : ''}`} title={readiness.detail || 'Pipeline service readiness'}>{READINESS_LABELS[readiness.status]}</small><small className="session-badge">{session.actor ? `${session.actor} · ${session.role}` : 'Connecting'}</small><input aria-label="Optional API token" type="password" value={apiToken} onChange={(e) => setApiToken(e.target.value)} placeholder="API token (optional)"/><button onClick={saveToken} aria-label="Save API token"><Save size={13}/><span>Save</span></button><button onClick={() => void refresh()} aria-label="Refresh tasks"><Activity size={14}/><span>Refresh</span></button><button className="theme-control" onClick={cycleTheme} aria-label={`Appearance: ${THEME_LABELS[themePreference]}. Activate to use ${THEME_LABELS[NEXT_THEME[themePreference]]}.`} title={`Appearance: ${THEME_LABELS[themePreference]} · Next: ${THEME_LABELS[NEXT_THEME[themePreference]]}`}><span className="theme-control-icon">{themePreference === 'system' ? <Monitor size={14}/> : resolvedTheme === 'dark' ? <Moon size={14}/> : <Sun size={14}/>}</span><span>{THEME_LABELS[themePreference]}</span></button></div></header>
       <div className="content">
         <div className="heading"><div><small>ENGINEERING AUTOMATION</small><h1>Issue remediation</h1><p>Turn a bug report into a reviewed patch with test evidence and a human decision.</p></div><span className="pipeline-label"><i/> 3-stage pipeline</span></div>
+        {readiness.status !== 'ready' && readiness.status !== 'checking' && <div className={`readiness-notice ${readiness.status}`} role={readiness.status === 'offline' ? 'alert' : 'status'}><span><b>Pipeline service: {READINESS_LABELS[readiness.status]}</b><small>{readiness.detail}</small></span><button disabled={readinessChecking} onClick={() => void checkReadiness()} aria-label="Check pipeline service readiness again">{readinessChecking ? 'Checking…' : 'Check again'}</button></div>}
         <label className="mobile-task-picker">Recent task<select aria-label="Select a recent task" value={task?.task_id || ''} onChange={(event) => { setTask(tasks.find((item) => item.task_id === event.target.value) || null); setActions([]); setTotalActions(0); setActionPageOffset(0); setEvents([]); setTotalEvents(0); setEventPageOffset(0); setReviewNotes(''); setCommitMessage(''); }}><option value="">Select a task</option>{tasks.map((item) => <option key={item.task_id} value={item.task_id}>{item.triage?.title || item.bug_report.slice(0, 70)} · {item.status.replaceAll('_', ' ')}</option>)}</select></label>
         <div className="mobile-task-filters"><input aria-label="Search tasks" value={taskSearch} onChange={(e) => { setTaskSearch(e.target.value); setTaskPageOffset(0); }} placeholder="Search tasks"/><select aria-label="Filter tasks by status" value={taskStatus} onChange={(e) => { setTaskStatus(e.target.value); setTaskPageOffset(0); }}><option value="">All statuses</option>{['RECEIVED','QUEUED','RUNNING','TRIAGING','TRIAGED','INVESTIGATING','INVESTIGATED','PATCHED','SANDBOX_RUNNING','SANDBOX_TESTED','REVIEWING','REVIEWED','AWAITING_HUMAN_APPROVAL','APPROVED','APPLIED','COMMITTED','REJECTED','CANCELLED','FAILED'].map((s) => <option key={s} value={s}>{s.replaceAll('_',' ')}</option>)}</select></div>
         <div className="mobile-task-pagination"><button disabled={taskPageOffset === 0} onClick={() => setTaskPageOffset(Math.max(0, taskPageOffset - 50))}>Newer tasks</button><span>{totalTasks ? `${taskPageOffset + 1}–${Math.min(taskPageOffset + tasks.length, totalTasks)} of ${totalTasks}` : 'No tasks'}</span><button disabled={taskPageOffset + 50 >= totalTasks} onClick={() => setTaskPageOffset(taskPageOffset + 50)}>Older tasks</button></div>
